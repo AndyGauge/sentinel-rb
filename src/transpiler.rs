@@ -12,14 +12,18 @@ impl SentinelTranspiler {
         let mut parser = Parser::new();
         let lang = tree_sitter_ruby::language();
         parser.set_language(lang).expect("Error loading Ruby grammar");
-        
-        // Query to find rbs-inline comments (e.g., #: (String) -> void) 
-        // and the method definition immediately following it.
-        let query = Query::new(lang, r#"
-            (comment) @type_annotation
-            .
-            (method (identifier) @method_name)
-        "#).expect("Error compiling Tree-sitter query");
+
+        // Updated query: Removed problematic leading whitespace and simplified the anchor
+        let query_code = r#"(
+  (comment) @type_annotation
+  .
+  (method
+    name: (identifier) @method_name)
+  (#match? @type_annotation "^#:")
+)"#;
+
+        let query = Query::new(lang, query_code)
+            .expect("Error compiling Tree-sitter query");
 
         Self { parser, query }
     }
@@ -35,7 +39,7 @@ impl SentinelTranspiler {
         for m in cursor.matches(&self.query, tree.root_node(), source.as_bytes()) {
             let annotation = &source[m.captures[0].node.start_byte()..m.captures[0].node.end_byte()];
             let method_name = &source[m.captures[1].node.start_byte()..m.captures[1].node.end_byte()];
-            
+
             // Convert "#: (String) -> void" to "def method_name: (String) -> void"
             if let Some(sig) = annotation.strip_prefix("#: ") {
                 rbs_output.push_str(&format!("def {}: {}\n", method_name, sig.trim()));

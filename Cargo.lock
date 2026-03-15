@@ -1124,6 +1124,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 name = "sentinel-rb"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "lsp-types",
  "notify",
  "reqwest",
