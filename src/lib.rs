@@ -5,11 +5,19 @@ pub struct Transpiler {
     query: Query,
 }
 
+impl Default for Transpiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Transpiler {
     pub fn new() -> Self {
         let mut parser = Parser::new();
         let language = tree_sitter_ruby::language();
-        parser.set_language(language).expect("Error loading Ruby grammar");
+        parser
+            .set_language(language)
+            .expect("Error loading Ruby grammar");
 
         // Look for the rbs-inline comment pattern + the method name
         let query = Query::new(
@@ -19,7 +27,8 @@ impl Transpiler {
             .
             (method (identifier) @name)
             "#,
-        ).expect("Error compiling Query");
+        )
+        .expect("Error compiling Query");
 
         Self { parser, query }
     }

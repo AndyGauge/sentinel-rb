@@ -1,15 +1,17 @@
+use crate::plugin::{SentinelPlugin, TypeCasePlugin, VoidArgumentPlugin}; // Import your plugins
 use crate::transpiler::SentinelTranspiler;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
+use tokio::time::{Duration, sleep};
 
 pub struct SentinelWatcher {
     #[allow(dead_code)]
     watcher: RecommendedWatcher,
     receiver: mpsc::Receiver<notify::Result<notify::Event>>,
     app_root: PathBuf,
+    plugins: Vec<Box<dyn SentinelPlugin>>,
 }
 
 impl SentinelWatcher {
@@ -18,7 +20,6 @@ impl SentinelWatcher {
         let (tx, rx) = mpsc::channel(100);
         let app_root = path.to_path_buf().canonicalize()?;
 
-        // Setup the native watcher with a closure that sends events into our async channel
         let mut watcher = RecommendedWatcher::new(
             move |res| {
                 let _ = tx.blocking_send(res);
@@ -32,7 +33,15 @@ impl SentinelWatcher {
             watcher,
             receiver: rx,
             app_root,
+            plugins: Vec::new(), // Initialize empty
         })
+    }
+
+    /// Register default plugins for RBS linting
+    pub fn with_plugins(mut self) -> Self {
+        self.plugins.push(Box::new(VoidArgumentPlugin));
+        self.plugins.push(Box::new(TypeCasePlugin));
+        self
     }
 
     /// The main event loop that processes file changes and triggers transpilation
@@ -43,10 +52,14 @@ impl SentinelWatcher {
         while let Some(res) = self.receiver.recv().await {
             match res {
                 Ok(event) => {
-                    // We only care about file modification and creation
                     if event.kind.is_modify() || event.kind.is_create() {
+                        // 1. Drain duplicate events (debouncing)
+                        while self.receiver.try_recv().is_ok() {}
+
                         for path in event.paths {
-                            if path.extension().map_or(false, |ext| ext == "rb") {
+                            if path.extension().is_some_and(|ext| ext == "rb") {
+                                // 2. Tiny delay to ensure file lock is released
+                                sleep(Duration::from_millis(50)).await;
                                 self.handle_change(&mut transpiler, &path).await;
                             }
                         }
@@ -58,44 +71,58 @@ impl SentinelWatcher {
     }
 
     async fn handle_change(&self, transpiler: &mut SentinelTranspiler, path: &Path) {
-        println!("🔍 Change detected: {:?}", path.file_name().unwrap_or_default());
+        println!(
+            "🔍 Change detected: {:?}",
+            path.file_name().unwrap_or_default()
+        );
 
         match transpiler.transpile_file(path) {
             Ok(rbs_content) => {
-                let target_path = self.derive_sig_path(path);
-
-                // Ensure the subdirectory structure exists in sig/generated
-                if let Some(parent) = target_path.parent() {
-                    if let Err(e) = fs::create_dir_all(parent) {
-                        eprintln!("❌ Failed to create directory {:?}: {}", parent, e);
-                        return;
+                // 1. RUN PLUGINS (The new linter system)
+                for plugin in &self.plugins {
+                    let issues = plugin.check(&rbs_content);
+                    if !issues.is_empty() {
+                        eprintln!(
+                            "⚠️  [{}] issues in {:?}:",
+                            plugin.name(),
+                            path.file_name().unwrap_or_default()
+                        );
+                        for (method, msg) in issues {
+                            eprintln!("   - Method `{}`: {}", method, msg);
+                        }
                     }
                 }
 
-                if let Err(e) = fs::write(&target_path, rbs_content) {
-                    eprintln!("❌ Failed to write RBS for {:?}: {}", path, e);
+                let target_path = self.derive_sig_path(path);
+
+                // 2. Ensure directory exists
+                if let Some(parent) = target_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+
+                // 3. Write file
+                if let Err(e) = std::fs::write(&target_path, &rbs_content) {
+                    eprintln!("❌ Failed to write RBS: {}", e);
                 } else {
-                    println!("✅ RBS Synced -> {:?}", target_path.strip_prefix(&self.app_root).unwrap_or(&target_path));
+                    println!(
+                        "✅ RBS Synced -> {:?}",
+                        target_path
+                            .strip_prefix(&self.app_root)
+                            .unwrap_or(&target_path)
+                    );
                 }
             }
-            Err(e) => eprintln!("❌ Transpiler error on {:?}: {}", path, e),
+            Err(e) => eprintln!("❌ Transpiler error: {}", e),
         }
     }
 
-    /// Maps an app file (e.g., ./app/models/user.rb) to a sig file (e.g., ./sig/generated/models/user.rbs)
     fn derive_sig_path(&self, rb_path: &Path) -> PathBuf {
         let mut p = PathBuf::from("./sig/generated");
-
-        // Strip the base path to maintain the internal directory structure
         if let Ok(relative) = rb_path.strip_prefix(&self.app_root) {
             p.push(relative);
-        } else {
-            // Fallback if the path is outside the root (shouldn't happen with the current setup)
-            if let Some(name) = rb_path.file_name() {
-                p.push(name);
-            }
+        } else if let Some(name) = rb_path.file_name() {
+            p.push(name);
         }
-
         p.set_extension("rbs");
         p
     }

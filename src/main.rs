@@ -1,9 +1,10 @@
 // main.rs
-mod watcher;
+mod plugin;
 mod transpiler;
+mod watcher;
 
-use std::path::Path;
 use anyhow::Result;
+use std::path::Path;
 use watcher::SentinelWatcher;
 
 #[tokio::main]
@@ -15,7 +16,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(sig_path)?;
 
     // Initialize our async watcher
-    let watcher = SentinelWatcher::new(app_path)?;
+    let watcher = SentinelWatcher::new(app_path)?.with_plugins();
 
     // Run the event loop
     watcher.run().await;
