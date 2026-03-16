@@ -1,18 +1,27 @@
 #!/usr/bin/env ruby
 require "rbconfig"
 
-# Detect architecture
+# Detect OS
 host_os = RbConfig::CONFIG['host_os']
-arch = case host_os
-       when /mswin|msys|mingw|cygwin|bccwin|wince|emc/
-         "windows"
-       when /darwin|mac os/
-         "darwin"
+os = case host_os
+     when /mswin|msys|mingw|cygwin|bccwin|wince|emc/
+       "windows"
+     when /darwin|mac os/
+       "darwin"
+     else
+       "linux"
+     end
+
+# Detect CPU architecture
+cpu = RbConfig::CONFIG['host_cpu']
+arch = case cpu
+       when /arm|aarch64/
+         "aarch64"
        else
-         "linux"
+         "x86_64"
        end
 
-binary_path = File.expand_path("../exe/sentinel-x86_64-#{arch}", __dir__)
+binary_path = File.expand_path("../exe/sentinel-#{arch}-#{os}", __dir__)
 
 if File.exist?(binary_path)
   # Forward all arguments from the ruby command to the Rust binary

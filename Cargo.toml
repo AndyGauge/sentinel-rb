@@ -1,6 +1,6 @@
 [package]
 name = "sentinel-rb"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Andy Gauger <https://github.com/andygauge>"]
 description = "High-speed Rust sidecar for Ruby Type-Safety and Agentic Orchestration"
@@ -15,13 +15,6 @@ tree-sitter-ruby = "0.20"
 # Async & Watcher - For the "Sentinel" daemon
 tokio = { version = "1.36", features = ["full"] }
 notify = "6.1.1"
-
-reqwest = { version = "0.12", features = ["json"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# LSP support to bridge to VSCode/NVIM
-lsp-types = "0.94"
 
 # Errors
 anyhow = "1.0"

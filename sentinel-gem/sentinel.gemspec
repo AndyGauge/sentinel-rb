@@ -1,6 +1,6 @@
 Gem::Specification.new do |spec|
   spec.name          = "sentinel"
-  spec.version       = "0.1.0"
+  spec.version       = "0.2.0"
   spec.executables   = ["sentinel"] # The Ruby wrapper in bin/
   spec.bindir        = "bin"
   spec.summary       = "Rust-powered RBS generator for Ruby models."

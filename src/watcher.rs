@@ -1,7 +1,8 @@
-use crate::plugin::{SentinelPlugin, TypeCasePlugin, VoidArgumentPlugin}; // Import your plugins
+use crate::plugin::{AngleBracketPlugin, SentinelPlugin, TypeCasePlugin, VoidArgumentPlugin};
 use crate::transpiler::SentinelTranspiler;
 use anyhow::Result;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
@@ -41,7 +42,20 @@ impl SentinelWatcher {
     pub fn with_plugins(mut self) -> Self {
         self.plugins.push(Box::new(VoidArgumentPlugin));
         self.plugins.push(Box::new(TypeCasePlugin));
+        self.plugins.push(Box::new(AngleBracketPlugin));
         self
+    }
+
+    /// Check if a path is a real .rb file (not a temp file from sed, editors, etc.)
+    fn is_watchable_rb(path: &Path) -> bool {
+        let ext_ok = path.extension().is_some_and(|ext| ext == "rb");
+        if !ext_ok {
+            return false;
+        }
+        match path.file_name().and_then(|f| f.to_str()) {
+            Some(name) => !name.starts_with('.') && !name.contains('~'),
+            None => false,
+        }
     }
 
     /// The main event loop that processes file changes and triggers transpilation
@@ -50,22 +64,35 @@ impl SentinelWatcher {
         println!("🚀 Sentinel standing guard over {:?}...", self.app_root);
 
         while let Some(res) = self.receiver.recv().await {
-            match res {
-                Ok(event) => {
-                    if event.kind.is_modify() || event.kind.is_create() {
-                        // 1. Drain duplicate events (debouncing)
-                        while self.receiver.try_recv().is_ok() {}
+            // Collect paths from this event
+            let mut changed_paths = HashSet::new();
+            if let Ok(event) = res {
+                if event.kind.is_modify() || event.kind.is_create() {
+                    for path in event.paths {
+                        if Self::is_watchable_rb(&path) {
+                            changed_paths.insert(path);
+                        }
+                    }
+                }
+            }
 
+            // Debounce: wait briefly, then drain and collect all pending events
+            sleep(Duration::from_millis(50)).await;
+            while let Ok(res) = self.receiver.try_recv() {
+                if let Ok(event) = res {
+                    if event.kind.is_modify() || event.kind.is_create() {
                         for path in event.paths {
-                            if path.extension().is_some_and(|ext| ext == "rb") {
-                                // 2. Tiny delay to ensure file lock is released
-                                sleep(Duration::from_millis(50)).await;
-                                self.handle_change(&mut transpiler, &path).await;
+                            if Self::is_watchable_rb(&path) {
+                                changed_paths.insert(path);
                             }
                         }
                     }
                 }
-                Err(e) => eprintln!("Watcher internal error: {:?}", e),
+            }
+
+            // Process all unique changed .rb files
+            for path in &changed_paths {
+                self.handle_change(&mut transpiler, path).await;
             }
         }
     }
