@@ -22,8 +22,8 @@ ls -lh sentinel-gem/exe/
 # Build the gem
 echo ""
 echo "Building gem..."
-rm -f sentinel-gem/sentinel-*.gem
+rm -f sentinel-gem/rbs-sentinel-*.gem
 cd sentinel-gem
-gem build sentinel.gemspec
+gem build rbs-sentinel.gemspec
 echo ""
-echo "Done! sentinel-${VERSION}.gem is ready in sentinel-gem/"
+echo "Done! rbs-sentinel-${VERSION}.gem is ready in sentinel-gem/"
