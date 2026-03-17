@@ -3,8 +3,8 @@
 ## [0.2.0] - 2026-03-16
 
 ### Fixed
-- **Fully-qualified class names**: Sentinel now emits proper nested `module`/`class` declarations instead of bare class names. Classes like `Tool::IdleRuleHandlers::Set` are wrapped in `module Tool; module IdleRuleHandlers; class Set` rather than emitting a flat `class Set` that collides across namespaces.
-- **Compact namespace support**: Classes using `class ApplicantFilter::Set` syntax are now recognized (previously emitted `class UnknownClass`).
+- **Fully-qualified class names**: Sentinel now emits proper nested `module`/`class` declarations instead of bare class names. Classes like `Top::Middle::Set` are wrapped in `module Tool; module IdleRuleHandlers; class Set` rather than emitting a flat `class Set` that collides across namespaces.
+- **Compact namespace support**: Classes using `class Proxy::Set` syntax are now recognized (previously emitted `class UnknownClass`).
 - **Multiple method signatures**: All `#:` annotated methods in a class are now emitted. Previously only the first method was captured; subsequent annotations inside `body_statement` were silently dropped.
 - **Editor temp file filtering**: Sentinel no longer attempts to transpile `sed` temp files (`.!PID!filename.rb`) or editor swap files, which caused spurious "No such file or directory" errors.
 - **Watcher debounce**: Replaced destructive event drain with a collect-then-process debounce. The old logic discarded pending events indiscriminately, causing ~1 in 3 saves to be missed.
