@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.1] - 2026-03-17
+
+### Added
+- **`sentinel init` command**: Parallel batch RBS generation using rayon. Scans all `.rb` files in `./app` and generates signatures across all CPU cores.
+- **Init-on-watch**: `sentinel watch` (the default) now runs a full init before starting the file watcher, ensuring `sig/generated` is always complete on startup.
+- **Skip unannotated files**: Files with no `#:` annotations are skipped entirely, avoiding unnecessary I/O. On a ~5k file codebase, this reduced init time from ~1.4s to ~0.4s.
+
+### Changed
+- **Gem renamed to `rbs-sentinel`**: The gem is now `gem 'rbs-sentinel'` on rubygems.org. The `bundle exec sentinel` command is unchanged.
+- Added `rayon` and `walkdir` dependencies for parallel file processing.
+
 ## [0.2.0] - 2026-03-16
 
 ### Fixed
