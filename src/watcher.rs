@@ -1,3 +1,4 @@
+use crate::config::SentinelConfig;
 use crate::plugin::{AngleBracketPlugin, SentinelPlugin, TypeCasePlugin, VoidArgumentPlugin};
 use crate::transpiler::SentinelTranspiler;
 use anyhow::Result;
@@ -11,15 +12,15 @@ pub struct SentinelWatcher {
     #[allow(dead_code)]
     watcher: RecommendedWatcher,
     receiver: mpsc::Receiver<notify::Result<notify::Event>>,
-    app_root: PathBuf,
+    app_roots: Vec<PathBuf>,
+    output_path: PathBuf,
     plugins: Vec<Box<dyn SentinelPlugin>>,
 }
 
 impl SentinelWatcher {
-    /// Initializes the watcher on the specified Ruby directory (e.g., ./app)
-    pub fn new(path: &Path) -> Result<Self> {
+    /// Initializes the watcher on all configured folders.
+    pub fn new(config: &SentinelConfig) -> Result<Self> {
         let (tx, rx) = mpsc::channel(100);
-        let app_root = path.to_path_buf().canonicalize()?;
 
         let mut watcher = RecommendedWatcher::new(
             move |res| {
@@ -28,13 +29,19 @@ impl SentinelWatcher {
             Config::default(),
         )?;
 
-        watcher.watch(&app_root, RecursiveMode::Recursive)?;
+        let mut app_roots = Vec::new();
+        for folder in config.folder_paths() {
+            let canonical = folder.canonicalize().unwrap_or_else(|_| folder.clone());
+            watcher.watch(&canonical, RecursiveMode::Recursive)?;
+            app_roots.push(canonical);
+        }
 
         Ok(Self {
             watcher,
             receiver: rx,
-            app_root,
-            plugins: Vec::new(), // Initialize empty
+            app_roots,
+            output_path: config.output_path(),
+            plugins: Vec::new(),
         })
     }
 
@@ -61,7 +68,9 @@ impl SentinelWatcher {
     /// The main event loop that processes file changes and triggers transpilation
     pub async fn run(mut self) {
         let mut transpiler = SentinelTranspiler::new();
-        println!("🚀 Sentinel standing guard over {:?}...", self.app_root);
+        for root in &self.app_roots {
+            println!("🚀 Sentinel standing guard over {:?}...", root);
+        }
 
         while let Some(res) = self.receiver.recv().await {
             // Collect paths from this event
@@ -95,6 +104,11 @@ impl SentinelWatcher {
                 self.handle_change(&mut transpiler, path).await;
             }
         }
+    }
+
+    /// Find which app_root contains this path
+    fn app_root_for(&self, path: &Path) -> Option<&PathBuf> {
+        self.app_roots.iter().find(|root| path.starts_with(root))
     }
 
     async fn handle_change(&self, transpiler: &mut SentinelTranspiler, path: &Path) {
@@ -131,12 +145,7 @@ impl SentinelWatcher {
                 if let Err(e) = std::fs::write(&target_path, &rbs_content) {
                     eprintln!("❌ Failed to write RBS: {}", e);
                 } else {
-                    println!(
-                        "✅ RBS Synced -> {:?}",
-                        target_path
-                            .strip_prefix(&self.app_root)
-                            .unwrap_or(&target_path)
-                    );
+                    println!("✅ RBS Synced -> {:?}", target_path);
                 }
             }
             Err(e) => eprintln!("❌ Transpiler error: {}", e),
@@ -144,9 +153,13 @@ impl SentinelWatcher {
     }
 
     fn derive_sig_path(&self, rb_path: &Path) -> PathBuf {
-        let mut p = PathBuf::from("./sig/generated");
-        if let Ok(relative) = rb_path.strip_prefix(&self.app_root) {
-            p.push(relative);
+        let mut p = self.output_path.clone();
+        if let Some(app_root) = self.app_root_for(rb_path) {
+            if let Ok(relative) = rb_path.strip_prefix(app_root) {
+                p.push(relative);
+            } else if let Some(name) = rb_path.file_name() {
+                p.push(name);
+            }
         } else if let Some(name) = rb_path.file_name() {
             p.push(name);
         }

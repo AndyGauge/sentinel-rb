@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.2] - 2026-03-18
+
+### Added
+- **`.sentinel.toml` config file**: Sentinel now reads watched folders and output path from a `.sentinel.toml` file at the project root. Created automatically on first `init` or `watch` with `app` as the default folder.
+- **`sentinel add <folder>`**: Add a folder to the watch list from the CLI.
+- **`sentinel remove <folder>`**: Remove a folder from the watch list.
+- **`sentinel list`**: Display current watched folders and output path.
+- **Multi-folder support**: `init` and `watch` now process all configured folders, not just `./app`.
+
+### Changed
+- `serde` and `toml` added as dependencies for config serialization.
+- Output path (`sig/generated`) is now configurable via the `output` key in `.sentinel.toml`.
+
 ## [0.2.1] - 2026-03-17
 
 ### Added

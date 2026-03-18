@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use walkdir::WalkDir;
 
-pub fn run(app_path: &Path) {
+pub fn run(app_path: &Path, output_path: &Path) {
     let start = Instant::now();
     let app_root = app_path
         .canonicalize()
@@ -63,7 +63,7 @@ pub fn run(app_path: &Path) {
                     }
                 }
 
-                let target_path = derive_sig_path(&app_root, path);
+                let target_path = derive_sig_path(&app_root, path, output_path);
 
                 if let Some(parent) = target_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -99,8 +99,8 @@ pub fn run(app_path: &Path) {
     );
 }
 
-fn derive_sig_path(app_root: &Path, rb_path: &Path) -> PathBuf {
-    let mut p = PathBuf::from("./sig/generated");
+fn derive_sig_path(app_root: &Path, rb_path: &Path, output_path: &Path) -> PathBuf {
+    let mut p = output_path.to_path_buf();
     if let Ok(relative) = rb_path.strip_prefix(app_root) {
         p.push(relative);
     } else if let Some(name) = rb_path.file_name() {

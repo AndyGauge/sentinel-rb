@@ -16,10 +16,38 @@ Then run:
     bundle install
 ```
 ### 2. Initialize the Project
-Run the following command to set up the necessary directories and a default Steepfile:
+Run the following command to set up the necessary directories and generate RBS files:
 ```
     bundle exec sentinel init
 ```
+This creates a `.sentinel.toml` config file (if one doesn't exist) with `app` as the default watched folder, then generates RBS signatures for all Ruby files in it.
+
+### 3. Configure Watched Folders
+
+Sentinel watches the `app` folder by default. Use the CLI to add or remove folders:
+
+```bash
+# Add a folder
+bundle exec sentinel add lib
+
+# Add another
+bundle exec sentinel add config/initializers
+
+# Remove a folder
+bundle exec sentinel remove app
+
+# List current configuration
+bundle exec sentinel list
+```
+
+The configuration is stored in `.sentinel.toml` at your project root:
+```toml
+folders = ["app", "lib"]
+output = "sig/generated"
+```
+
+You can also edit this file directly. Sentinel reads it on every `init` and `watch` command.
+
 ---
 
 ## 🛠️ Editor Setup
@@ -61,7 +89,7 @@ Add this to your LSP configuration (e.g., lsp.lua). This ensures Steep is aware 
 
 Sentinel is designed to be a "set-and-forget" background service:
 
-1. The Watcher: You run 'bundle exec sentinel watch'. It stays active, monitoring your app/models folder.
+1. The Watcher: You run 'bundle exec sentinel watch'. It stays active, monitoring your configured folders (default: app).
 2. The Transpiler: The moment you save a Ruby file, Sentinel's Rust engine generates a corresponding .rbs file in sig/generated.
 3. The Feedback: Your editor (via Steep) sees the new .rbs and immediately updates the diagnostics in your Ruby file.
 
