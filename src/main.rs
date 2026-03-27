@@ -1,3 +1,4 @@
+mod check;
 mod config;
 mod init;
 mod plugin;
@@ -19,6 +20,18 @@ async fn main() -> Result<()> {
             std::fs::create_dir_all(config.output_path())?;
             for folder in config.folder_paths() {
                 init::run(&folder, &config.output_path());
+            }
+        }
+        "check" => {
+            let config = SentinelConfig::load()?;
+            let mut all_ok = true;
+            for folder in config.folder_paths() {
+                if !check::run(&folder, &config.output_path()) {
+                    all_ok = false;
+                }
+            }
+            if !all_ok {
+                std::process::exit(1);
             }
         }
         "watch" => {
@@ -66,11 +79,12 @@ async fn main() -> Result<()> {
         }
         other => {
             eprintln!("Unknown command: {}", other);
-            eprintln!("Usage: sentinel [init|watch|add|remove|list]");
+            eprintln!("Usage: sentinel [init|watch|check|add|remove|list]");
             eprintln!();
             eprintln!("Commands:");
             eprintln!("  init           Generate RBS files for all watched folders");
             eprintln!("  watch          Watch for changes and regenerate (default)");
+            eprintln!("  check          Verify signatures are up to date (exit 1 if stale)");
             eprintln!("  add <folder>   Add a folder to the watch list");
             eprintln!("  remove <folder> Remove a folder from the watch list");
             eprintln!("  list           Show watched folders and output path");

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.0] - 2026-03-26
+
+### Added
+- **`sentinel check` command**: Read-only verification that generated RBS signatures are up to date. Exits with code 1 if any files are missing or stale. Designed for CI pipelines and Git pre-commit hooks.
+
 ## [0.2.2] - 2026-03-18
 
 ### Added

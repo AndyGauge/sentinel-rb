@@ -50,6 +50,41 @@ You can also edit this file directly. Sentinel reads it on every `init` and `wat
 
 ---
 
+## 🔍 Checking Signatures in CI / Pre-commit
+
+Use `sentinel check` to verify that generated RBS files are up to date **without modifying anything**. It exits with code 1 if any signatures are missing or stale.
+
+```bash
+bundle exec sentinel check
+```
+
+### GitHub Actions
+
+```yaml
+- name: Check RBS signatures are up to date
+  run: bundle exec sentinel check
+```
+
+### Git Pre-commit Hook
+
+Add the following to `.git/hooks/pre-commit` (or use a framework like [Lefthook](https://github.com/evilmartians/lefthook) or [Husky](https://github.com/typicode/husky)):
+
+```bash
+#!/usr/bin/env bash
+set -e
+
+bundle exec sentinel check
+```
+
+Then make it executable:
+```bash
+chmod +x .git/hooks/pre-commit
+```
+
+If the check fails, run `bundle exec sentinel init` to regenerate, review the changes, and commit again.
+
+---
+
 ## 🛠️ Editor Setup
 
 To get live type-checking diagnostics, your editor needs to talk to Steep (the Ruby Type Server), which monitors the signatures Sentinel generates.

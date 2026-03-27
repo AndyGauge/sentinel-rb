@@ -1,12 +1,14 @@
+use crate::init::derive_sig_path;
 use crate::plugin::{AngleBracketPlugin, SentinelPlugin, TypeCasePlugin, VoidArgumentPlugin};
 use crate::transpiler::SentinelTranspiler;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 use walkdir::WalkDir;
 
-pub fn run(app_path: &Path, output_path: &Path) {
+pub fn run(app_path: &Path, output_path: &Path) -> bool {
     let start = Instant::now();
     let app_root = app_path
         .canonicalize()
@@ -27,7 +29,7 @@ pub fn run(app_path: &Path, output_path: &Path) {
         .collect();
 
     let total = files.len();
-    println!("Found {} Ruby files in {:?}", total, app_path);
+    println!("Checking {} Ruby files in {:?}", total, app_path);
 
     let plugins: Vec<Box<dyn SentinelPlugin>> = vec![
         Box::new(VoidArgumentPlugin),
@@ -35,7 +37,9 @@ pub fn run(app_path: &Path, output_path: &Path) {
         Box::new(AngleBracketPlugin),
     ];
 
-    let success = AtomicUsize::new(0);
+    let stale_files: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    let missing_files: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    let checked = AtomicUsize::new(0);
     let skipped = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
 
@@ -65,15 +69,24 @@ pub fn run(app_path: &Path, output_path: &Path) {
 
                 let target_path = derive_sig_path(&app_root, path, output_path);
 
-                if let Some(parent) = target_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+                if !target_path.exists() {
+                    missing_files.lock().unwrap().push(target_path);
+                    checked.fetch_add(1, Ordering::Relaxed);
+                    return;
                 }
 
-                if let Err(e) = std::fs::write(&target_path, &rbs_content) {
-                    eprintln!("Failed to write {:?}: {}", target_path, e);
-                    failed.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    success.fetch_add(1, Ordering::Relaxed);
+                match std::fs::read_to_string(&target_path) {
+                    Ok(existing) if existing == rbs_content => {
+                        checked.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(_) => {
+                        stale_files.lock().unwrap().push(target_path);
+                        checked.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to read {:?}: {}", target_path, e);
+                        failed.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
             Err(e) => {
@@ -88,24 +101,45 @@ pub fn run(app_path: &Path, output_path: &Path) {
     });
 
     let elapsed = start.elapsed();
-    let ok = success.load(Ordering::Relaxed);
+    let stale = stale_files.lock().unwrap();
+    let missing = missing_files.lock().unwrap();
     let err = failed.load(Ordering::Relaxed);
-
     let skip = skipped.load(Ordering::Relaxed);
 
-    println!(
-        "Generated {} RBS files in {:.1?} ({} skipped, {} errors)",
-        ok, elapsed, skip, err
-    );
-}
+    let all_ok = stale.is_empty() && missing.is_empty() && err == 0;
 
-pub fn derive_sig_path(app_root: &Path, rb_path: &Path, output_path: &Path) -> PathBuf {
-    let mut p = output_path.to_path_buf();
-    if let Ok(relative) = rb_path.strip_prefix(app_root) {
-        p.push(relative);
-    } else if let Some(name) = rb_path.file_name() {
-        p.push(name);
+    if !missing.is_empty() {
+        println!("\nMissing RBS files:");
+        for f in missing.iter() {
+            println!("  {}", f.display());
+        }
     }
-    p.set_extension("rbs");
-    p
+
+    if !stale.is_empty() {
+        println!("\nStale RBS files:");
+        for f in stale.iter() {
+            println!("  {}", f.display());
+        }
+    }
+
+    if all_ok {
+        println!(
+            "All signatures up to date ({} checked, {} skipped) in {:.1?}",
+            checked.load(Ordering::Relaxed),
+            skip,
+            elapsed
+        );
+    } else {
+        println!(
+            "\n{} missing, {} stale, {} errors ({} skipped) in {:.1?}",
+            missing.len(),
+            stale.len(),
+            err,
+            skip,
+            elapsed
+        );
+        println!("Run `bundle exec sentinel init` to regenerate.");
+    }
+
+    all_ok
 }
