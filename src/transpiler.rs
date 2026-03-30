@@ -735,6 +735,35 @@ end
     }
 
     #[test]
+    fn test_multiline_annotation_class_self_block() {
+        let test_file = Path::new("/tmp/test_multiline_class_self.rb");
+        fs::write(
+            test_file,
+            "\
+class Builder
+  class << self
+    #: (
+    #:   String,
+    #:   ?config: Hash[Symbol, untyped]
+    #: ) -> Builder
+    def create(name, config: {})
+    end
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("def self.create: ( String, ?config: Hash[Symbol, untyped] ) -> Builder"),
+            "Expected multiline annotation in class << self, got: {}",
+            result
+        );
+    }
+
+    #[test]
     fn test_has_content() {
         assert!(SentinelTranspiler::has_content("  def foo: () -> void\n"));
         assert!(SentinelTranspiler::has_content("  type error_code = String\n"));
