@@ -127,7 +127,19 @@ impl SentinelTranspiler {
                             pending_type_alias = None;
                         }
                     } else if let Some(sig) = text.strip_prefix("#: ") {
-                        pending_annotation = Some(sig.trim().to_string());
+                        let trimmed = sig.trim();
+                        if let Some(ref mut ann) = pending_annotation {
+                            if !Self::is_balanced(ann) {
+                                // Continue multi-line #: annotation
+                                ann.push(' ');
+                                ann.push_str(trimmed);
+                            } else {
+                                // Previous annotation was complete; start fresh
+                                pending_annotation = Some(trimmed.to_string());
+                            }
+                        } else {
+                            pending_annotation = Some(trimmed.to_string());
+                        }
                     } else {
                         pending_annotation = None;
                     }
@@ -638,6 +650,117 @@ end
         assert!(result.contains("attr_reader name: String"), "Missing attr_reader, got: {}", result);
         assert!(result.contains("def self.call: (Hash[Symbol, untyped]) -> result"), "Missing self.call, got: {}", result);
         assert!(result.contains("def validate: () -> void"), "Missing validate, got: {}", result);
+    }
+
+    #[test]
+    fn test_multiline_annotation() {
+        let test_file = Path::new("/tmp/test_multiline_annotation.rb");
+        fs::write(
+            test_file,
+            "\
+class MultilineTest
+  #: (
+  #:   name: String,
+  #:   age: Integer,
+  #:   ?email: String?
+  #: ) -> Hash[Symbol, untyped]
+  def self.call(name:, age:, email: nil)
+    { name: name, age: age }
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("def self.call: ( name: String, age: Integer, ?email: String? ) -> Hash[Symbol, untyped]"),
+            "Expected joined multiline annotation, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_multiline_annotation_instance_method() {
+        let test_file = Path::new("/tmp/test_multiline_instance.rb");
+        fs::write(
+            test_file,
+            "\
+class Processor
+  #: (
+  #:   Array[String],
+  #:   Integer
+  #: ) -> bool
+  def run(items, limit)
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("def run: ( Array[String], Integer ) -> bool"),
+            "Expected joined multiline annotation, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_multiline_annotation_does_not_merge_separate() {
+        let test_file = Path::new("/tmp/test_no_merge_separate.rb");
+        fs::write(
+            test_file,
+            "\
+class Separate
+  #: () -> String
+  #: (Integer) -> void
+  def overloaded
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        // The second balanced annotation should overwrite the first
+        assert!(
+            result.contains("def overloaded: (Integer) -> void"),
+            "Expected second annotation to win, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_multiline_annotation_class_self_block() {
+        let test_file = Path::new("/tmp/test_multiline_class_self.rb");
+        fs::write(
+            test_file,
+            "\
+class Builder
+  class << self
+    #: (
+    #:   String,
+    #:   ?config: Hash[Symbol, untyped]
+    #: ) -> Builder
+    def create(name, config: {})
+    end
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("def self.create: ( String, ?config: Hash[Symbol, untyped] ) -> Builder"),
+            "Expected multiline annotation in class << self, got: {}",
+            result
+        );
     }
 
     #[test]
