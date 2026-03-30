@@ -99,29 +99,50 @@ impl SentinelTranspiler {
         let mut pending_type_alias: Option<String> = None;
 
         for &child in children {
+            // Finalize pending type alias if this node doesn't continue it
+            if pending_type_alias.is_some() {
+                let continues = child.kind() == "comment" && {
+                    let text = Self::node_text(source, &child);
+                    !text.starts_with("# @rbs type ")
+                        && !text.starts_with("#: ")
+                        && text
+                            .strip_prefix('#')
+                            .map(|c| {
+                                let t = c.trim();
+                                t.starts_with('|')
+                                    || !Self::is_balanced(
+                                        pending_type_alias.as_ref().unwrap(),
+                                    )
+                                    || pending_type_alias
+                                        .as_ref()
+                                        .unwrap()
+                                        .ends_with('|')
+                            })
+                            .unwrap_or(false)
+                };
+                if !continues {
+                    let alias = pending_type_alias.take().unwrap();
+                    if Self::is_balanced(&alias) && !alias.ends_with('|') {
+                        info.type_aliases.push(format!("type {}", alias));
+                    }
+                }
+            }
+
             match child.kind() {
                 "comment" => {
                     let text = Self::node_text(source, &child);
 
                     // Check for @rbs type alias
                     if let Some(rest) = text.strip_prefix("# @rbs type ") {
-                        let trimmed = rest.trim().to_string();
-                        if Self::is_balanced(&trimmed) {
-                            info.type_aliases.push(format!("type {}", trimmed));
-                            pending_type_alias = None;
-                        } else {
-                            pending_type_alias = Some(trimmed);
-                        }
+                        pending_type_alias = Some(rest.trim().to_string());
                         pending_annotation = None;
                     } else if let Some(ref mut alias) = pending_type_alias {
                         // Continue multi-line type alias
                         if let Some(cont) = text.strip_prefix('#') {
-                            alias.push(' ');
-                            alias.push_str(cont.trim());
-                            if Self::is_balanced(alias) {
-                                info.type_aliases
-                                    .push(format!("type {}", alias));
-                                pending_type_alias = None;
+                            let trimmed = cont.trim();
+                            if !trimmed.is_empty() {
+                                alias.push(' ');
+                                alias.push_str(trimmed);
                             }
                         } else {
                             pending_type_alias = None;
@@ -217,6 +238,13 @@ impl SentinelTranspiler {
                         pending_type_alias = None;
                     }
                 }
+            }
+        }
+
+        // Finalize any remaining pending type alias
+        if let Some(alias) = pending_type_alias {
+            if Self::is_balanced(&alias) && !alias.ends_with('|') {
+                info.type_aliases.push(format!("type {}", alias));
             }
         }
     }
@@ -759,6 +787,118 @@ end
         assert!(
             result.contains("def self.create: ( String, ?config: Hash[Symbol, untyped] ) -> Builder"),
             "Expected multiline annotation in class << self, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_type_alias_multiline_union() {
+        let test_file = Path::new("/tmp/test_type_alias_union.rb");
+        fs::write(
+            test_file,
+            "\
+class Applicant
+  # @rbs type error_code = \"applicant_not_found\"
+  #                      | \"stage_transition_invalid\"
+  #                      | \"permission_denied\"
+  #                      | \"applicant_already_at_stage\"
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("type error_code = \"applicant_not_found\" | \"stage_transition_invalid\" | \"permission_denied\" | \"applicant_already_at_stage\""),
+            "Expected multiline union type alias, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_type_alias_multiline_union_trailing_pipe() {
+        let test_file = Path::new("/tmp/test_type_alias_union_trail.rb");
+        fs::write(
+            test_file,
+            "\
+class Applicant
+  # @rbs type status = \"active\" |
+  #   \"inactive\" |
+  #   \"pending\"
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("type status = \"active\" | \"inactive\" | \"pending\""),
+            "Expected multiline union type alias with trailing pipe, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_type_alias_multiline_union_then_method() {
+        let test_file = Path::new("/tmp/test_type_alias_union_method.rb");
+        fs::write(
+            test_file,
+            "\
+class Foo
+  # @rbs type error_code = \"not_found\"
+  #                      | \"denied\"
+
+  #: () -> error_code
+  def check
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("type error_code = \"not_found\" | \"denied\""),
+            "Expected union type alias, got: {}",
+            result
+        );
+        assert!(
+            result.contains("def check: () -> error_code"),
+            "Expected method after type alias, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_type_alias_trailing_pipe_then_annotation() {
+        let test_file = Path::new("/tmp/test_type_alias_trail_ann.rb");
+        fs::write(
+            test_file,
+            "\
+class Foo
+  # @rbs type status = \"active\" |
+  #   \"inactive\"
+  #: () -> status
+  def check
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("type status = \"active\" | \"inactive\""),
+            "Expected trailing-pipe union type alias, got: {}",
+            result
+        );
+        assert!(
+            result.contains("def check: () -> status"),
+            "Expected method annotation not swallowed by type alias, got: {}",
             result
         );
     }
