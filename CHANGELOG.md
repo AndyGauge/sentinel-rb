@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.1] - 2026-03-29
+
+### Added
+- **Class method support (`def self.method_name`)**: Singleton methods are now detected and emitted as `def self.name: sig` in RBS output.
+- **`class << self` block support**: Methods defined inside singleton class blocks are emitted as class methods.
+- **`# @rbs type` alias support**: Single-line and multi-line type alias declarations are parsed and emitted as `type name = definition` in RBS output.
+- **`attr_reader`/`attr_writer`/`attr_accessor` support**: Typed attribute annotations using `#:` are detected and emitted (e.g., `attr_reader name: String`). Supports multiple symbols per call.
+
+### Changed
+- Refactored class body traversal into `flatten_children()` + `scan_body()` to support all new node types without duplication.
+- Files containing only type aliases or attributes are no longer skipped during `init` and `check`.
+- `is_balanced()` uses stack-based delimiter matching instead of a simple depth counter.
+
 ## [0.3.0] - 2026-03-26
 
 ### Added
