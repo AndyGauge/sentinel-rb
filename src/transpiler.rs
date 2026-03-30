@@ -5,6 +5,7 @@ use tree_sitter::{Node, Parser};
 struct ClassInfo {
     modules: Vec<String>,
     class_name: String,
+    is_module: bool,
     methods: Vec<(String, String)>,
     self_methods: Vec<(String, String)>,
     type_aliases: Vec<String>,
@@ -62,6 +63,7 @@ impl SentinelTranspiler {
         let mut info = ClassInfo {
             modules: Vec::new(),
             class_name: "UnknownClass".to_string(),
+            is_module: false,
             methods: Vec::new(),
             self_methods: Vec::new(),
             type_aliases: Vec::new(),
@@ -270,6 +272,26 @@ impl SentinelTranspiler {
                         Self::walk(source, child, module_stack, info);
                     }
 
+                    // If no class was found inside, check if this module
+                    // itself contains annotated content (e.g. concerns)
+                    if info.class_name == "UnknownClass" {
+                        let children = Self::flatten_children(node);
+                        Self::scan_body(source, &children, info, false);
+                        if !info.methods.is_empty()
+                            || !info.self_methods.is_empty()
+                            || !info.type_aliases.is_empty()
+                            || !info.attributes.is_empty()
+                        {
+                            for _ in 0..pushed {
+                                module_stack.pop();
+                            }
+                            info.modules = module_stack.clone();
+                            info.class_name = name.to_string();
+                            info.is_module = true;
+                            return;
+                        }
+                    }
+
                     for _ in 0..pushed {
                         module_stack.pop();
                     }
@@ -279,10 +301,17 @@ impl SentinelTranspiler {
             "class" => {
                 // Snapshot the current module stack — this is the nesting at class definition
                 info.modules = module_stack.clone();
+                info.is_module = false;
 
                 if let Some(name_node) = node.child_by_field_name("name") {
                     info.class_name = Self::node_text(source, &name_node).to_string();
                 }
+
+                // Clear any data from a previously scanned module container
+                info.methods.clear();
+                info.self_methods.clear();
+                info.type_aliases.clear();
+                info.attributes.clear();
 
                 // Flatten direct children + body_statement children, then scan
                 let children = Self::flatten_children(node);
@@ -325,7 +354,8 @@ impl SentinelTranspiler {
 
         let class_indent = "  ".repeat(depth);
         let member_indent = "  ".repeat(depth + 1);
-        rbs_output.push_str(&format!("{}class {}\n", class_indent, info.class_name));
+        let keyword = if info.is_module { "module" } else { "class" };
+        rbs_output.push_str(&format!("{}{} {}\n", class_indent, keyword, info.class_name));
 
         // Type aliases
         for alias in &info.type_aliases {
@@ -899,6 +929,184 @@ end
         assert!(
             result.contains("def check: () -> status"),
             "Expected method annotation not swallowed by type alias, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_module_with_annotations() {
+        let test_file = Path::new("/tmp/test_module_annotations.rb");
+        fs::write(
+            test_file,
+            "\
+module Tool
+  module Concerns
+    module ConceptResolvable
+      extend ActiveSupport::Concern
+
+      private
+
+      #: (String concept_id) -> Hash[Symbol, untyped]
+      def resolve_concept_id(concept_id)
+      end
+    end
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("module Tool\n"),
+            "Expected module Tool, got: {}",
+            result
+        );
+        assert!(
+            result.contains("  module Concerns\n"),
+            "Expected module Concerns, got: {}",
+            result
+        );
+        assert!(
+            result.contains("    module ConceptResolvable\n"),
+            "Expected module ConceptResolvable (not class), got: {}",
+            result
+        );
+        assert!(
+            result.contains("def resolve_concept_id: (String concept_id) -> Hash[Symbol, untyped]"),
+            "Expected method signature, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_module_single_level() {
+        let test_file = Path::new("/tmp/test_module_single.rb");
+        fs::write(
+            test_file,
+            "\
+module Serializable
+  #: () -> Hash[Symbol, untyped]
+  def to_h
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("module Serializable\n"),
+            "Expected module declaration, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("class "),
+            "Should not contain class keyword, got: {}",
+            result
+        );
+        assert!(
+            result.contains("def to_h: () -> Hash[Symbol, untyped]"),
+            "Expected method, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_module_without_annotations_skipped() {
+        let test_file = Path::new("/tmp/test_module_no_ann.rb");
+        fs::write(
+            test_file,
+            "\
+module Concerns
+  module Loggable
+    extend ActiveSupport::Concern
+    def log(message)
+    end
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            !SentinelTranspiler::has_content(&result),
+            "Module without annotations should have no content, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_module_with_class_inside_uses_class() {
+        let test_file = Path::new("/tmp/test_module_with_class.rb");
+        fs::write(
+            test_file,
+            "\
+module Admin
+  class UsersController
+    #: () -> void
+    def index
+    end
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("module Admin\n"),
+            "Expected wrapper module, got: {}",
+            result
+        );
+        assert!(
+            result.contains("class UsersController\n"),
+            "Expected class (not module) for inner class, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_annotated_module_then_class_uses_class() {
+        let test_file = Path::new("/tmp/test_module_then_class.rb");
+        fs::write(
+            test_file,
+            "\
+module Helpers
+  #: () -> String
+  def helper_method
+  end
+end
+
+class Service
+  #: () -> void
+  def perform
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("class Service\n"),
+            "Expected class keyword for Service, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("module Service"),
+            "Service should not be emitted as module, got: {}",
+            result
+        );
+        assert!(
+            result.contains("def perform: () -> void"),
+            "Expected Service's method, got: {}",
             result
         );
     }

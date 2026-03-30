@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.4] - 2026-03-30
+
+### Added
+- **Module RBS generation**: Modules with `#:` annotations (e.g. ActiveSupport::Concern modules) now generate `.rbs` signatures. Previously only classes were processed, causing `RBS::UnknownTypeName` errors for included concerns. (#7)
+
 ## [0.3.3] - 2026-03-30
 
 ### Fixed
