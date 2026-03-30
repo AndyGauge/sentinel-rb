@@ -44,7 +44,7 @@ pub fn run(app_path: &Path, output_path: &Path) {
 
         match transpiler.transpile_file(path) {
             Ok(rbs_content) => {
-                if !rbs_content.contains("def ") {
+                if !SentinelTranspiler::has_content(&rbs_content) {
                     skipped.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
