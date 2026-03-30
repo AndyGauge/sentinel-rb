@@ -104,6 +104,7 @@ impl SentinelTranspiler {
                 let continues = child.kind() == "comment" && {
                     let text = Self::node_text(source, &child);
                     !text.starts_with("# @rbs type ")
+                        && !text.starts_with("#: ")
                         && text
                             .strip_prefix('#')
                             .map(|c| {
@@ -867,6 +868,37 @@ end
         assert!(
             result.contains("def check: () -> error_code"),
             "Expected method after type alias, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_type_alias_trailing_pipe_then_annotation() {
+        let test_file = Path::new("/tmp/test_type_alias_trail_ann.rb");
+        fs::write(
+            test_file,
+            "\
+class Foo
+  # @rbs type status = \"active\" |
+  #   \"inactive\"
+  #: () -> status
+  def check
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("type status = \"active\" | \"inactive\""),
+            "Expected trailing-pipe union type alias, got: {}",
+            result
+        );
+        assert!(
+            result.contains("def check: () -> status"),
+            "Expected method annotation not swallowed by type alias, got: {}",
             result
         );
     }

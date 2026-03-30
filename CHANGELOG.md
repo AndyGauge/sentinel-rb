@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.3] - 2026-03-30
+
+### Fixed
+- **Multiline `# @rbs type` union aliases**: Continuation lines using `|` (both leading-pipe and trailing-pipe styles) were silently dropped. Only the first line was included in generated `.rbs` output. (#5)
+- **Trailing-pipe type alias followed by `#:` annotation**: A `#:` method signature immediately after a trailing-pipe union type alias is no longer swallowed as part of the type alias.
+
 ## [0.3.2] - 2026-03-29
 
 ### Fixed
