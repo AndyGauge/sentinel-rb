@@ -31,17 +31,29 @@ impl SentinelTranspiler {
         &source[node.start_byte()..node.end_byte()]
     }
 
-    /// Check if braces/brackets/parens are balanced in a string
+    /// Check if braces/brackets/parens are balanced and correctly matched
     fn is_balanced(s: &str) -> bool {
-        let mut depth = 0i32;
+        let mut stack: Vec<char> = Vec::new();
+
         for ch in s.chars() {
             match ch {
-                '{' | '(' | '[' => depth += 1,
-                '}' | ')' | ']' => depth -= 1,
+                '{' | '(' | '[' => stack.push(ch),
+                '}' | ')' | ']' => {
+                    let Some(open) = stack.pop() else {
+                        return false;
+                    };
+                    if !matches!(
+                        (open, ch),
+                        ('{', '}') | ('[', ']') | ('(', ')')
+                    ) {
+                        return false;
+                    }
+                }
                 _ => {}
             }
         }
-        depth == 0
+
+        stack.is_empty()
     }
 
     /// Collect structure from the AST: module nesting, class name, and annotated methods.
