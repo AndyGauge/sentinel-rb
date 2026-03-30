@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.2] - 2026-03-29
+
+### Fixed
+- **Multiline `#:` annotations**: Continuation lines are now accumulated instead of overwriting earlier lines. Previously only the closing line was captured, dropping all parameters. Uses the existing `is_balanced()` delimiter check to detect incomplete signatures. (#3)
+
 ## [0.3.1] - 2026-03-29
 
 ### Added
