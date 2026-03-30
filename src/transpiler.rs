@@ -301,10 +301,17 @@ impl SentinelTranspiler {
             "class" => {
                 // Snapshot the current module stack — this is the nesting at class definition
                 info.modules = module_stack.clone();
+                info.is_module = false;
 
                 if let Some(name_node) = node.child_by_field_name("name") {
                     info.class_name = Self::node_text(source, &name_node).to_string();
                 }
+
+                // Clear any data from a previously scanned module container
+                info.methods.clear();
+                info.self_methods.clear();
+                info.type_aliases.clear();
+                info.attributes.clear();
 
                 // Flatten direct children + body_statement children, then scan
                 let children = Self::flatten_children(node);
@@ -1060,6 +1067,46 @@ end
         assert!(
             result.contains("class UsersController\n"),
             "Expected class (not module) for inner class, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_annotated_module_then_class_uses_class() {
+        let test_file = Path::new("/tmp/test_module_then_class.rb");
+        fs::write(
+            test_file,
+            "\
+module Helpers
+  #: () -> String
+  def helper_method
+  end
+end
+
+class Service
+  #: () -> void
+  def perform
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("class Service\n"),
+            "Expected class keyword for Service, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("module Service"),
+            "Service should not be emitted as module, got: {}",
+            result
+        );
+        assert!(
+            result.contains("def perform: () -> void"),
+            "Expected Service's method, got: {}",
             result
         );
     }
