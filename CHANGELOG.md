@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.5] - 2026-05-01
+
+### Changed
+- **Multi-line formatting for wide records and signatures**: Record types with more than 3 keys and method signatures with more than 3 parameters are now emitted across multiple lines in `.rbs` output. Previously these collapsed onto a single line, producing 1500+ character lines that were unreadable in PR diffs. Records and signatures with 3 or fewer entries are unaffected. (#10)
+
+  Before:
+  ```rbs
+  type applicant_local = { external_id: String, name: String, email: String, status: String }
+  ```
+  After:
+  ```rbs
+  type applicant_local = {
+    external_id: String,
+    name: String,
+    email: String,
+    status: String,
+  }
+  ```
+
+### Migration notes
+- Regenerating signatures will produce a one-time diff in committed `sig/` files for any record or method over the 3-entry threshold. The output is semantically identical — re-run `sentinel init` to land the formatting change in one commit.
+
 ## [0.3.4] - 2026-03-30
 
 ### Added
