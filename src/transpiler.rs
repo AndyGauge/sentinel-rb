@@ -2,6 +2,10 @@ use std::fs;
 use std::path::Path;
 use tree_sitter::{Node, Parser};
 
+/// Record types and method-parameter lists with more than this many top-level entries
+/// are emitted on multiple lines in the generated `.rbs` output.
+const MULTILINE_THRESHOLD: usize = 3;
+
 struct ClassInfo {
     modules: Vec<String>,
     class_name: String,
@@ -333,6 +337,126 @@ impl SentinelTranspiler {
         rbs.contains("def ") || rbs.contains("type ") || rbs.contains("attr_")
     }
 
+    /// Split `s` at top-level commas (ignoring commas nested inside `{}`, `()`, `[]`).
+    /// Leading/trailing whitespace is trimmed from each segment; empty segments are dropped.
+    fn split_top_level_commas(s: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut depth = 0usize;
+        let mut current = String::new();
+        for ch in s.chars() {
+            match ch {
+                '{' | '(' | '[' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                '}' | ')' | ']' => {
+                    depth = depth.saturating_sub(1);
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    let trimmed = current.trim().to_string();
+                    current.clear();
+                    if !trimmed.is_empty() {
+                        result.push(trimmed);
+                    }
+                }
+                _ => current.push(ch),
+            }
+        }
+        let last = current.trim().to_string();
+        if !last.is_empty() {
+            result.push(last);
+        }
+        result
+    }
+
+    /// If `s` looks like `{ k1: T1, k2: T2, ... }` and has more than
+    /// [`MULTILINE_THRESHOLD`] top-level entries, return a multi-line version;
+    /// otherwise return `s` unchanged.
+    ///
+    /// * `field_indent`  – indentation prepended to each field line.
+    /// * `close_indent`  – indentation prepended to the closing `}`.
+    fn maybe_format_record(s: &str, field_indent: &str, close_indent: &str) -> String {
+        let trimmed = s.trim();
+        let inner = match trimmed
+            .strip_prefix('{')
+            .and_then(|t| t.strip_suffix('}'))
+        {
+            Some(i) => i.trim(),
+            None => return s.to_string(),
+        };
+        let entries = Self::split_top_level_commas(inner);
+        if entries.len() <= MULTILINE_THRESHOLD {
+            return s.to_string();
+        }
+        let mut out = String::from("{\n");
+        for entry in &entries {
+            out.push_str(field_indent);
+            out.push_str(entry);
+            out.push_str(",\n");
+        }
+        out.push_str(close_indent);
+        out.push('}');
+        out
+    }
+
+    /// If `sig` starts with `(...)` and has more than [`MULTILINE_THRESHOLD`]
+    /// top-level parameters, split the parameter list onto separate lines;
+    /// otherwise return `sig` unchanged.
+    ///
+    /// * `param_indent`  – indentation prepended to each parameter line.
+    /// * `close_indent`  – indentation prepended to the closing `)`.
+    fn maybe_format_sig(sig: &str, param_indent: &str, close_indent: &str) -> String {
+        let trimmed = sig.trim();
+        if !trimmed.starts_with('(') {
+            return sig.to_string();
+        }
+
+        // Find the matching closing parenthesis.
+        let mut depth = 0usize;
+        let mut close_pos = None;
+        for (i, ch) in trimmed.char_indices() {
+            match ch {
+                '(' | '{' | '[' => depth += 1,
+                ')' | '}' | ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close_pos = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let close_pos = match close_pos {
+            Some(p) => p,
+            None => return sig.to_string(),
+        };
+
+        let inner = trimmed[1..close_pos].trim();
+        let after = trimmed[close_pos + 1..].trim(); // e.g. " -> ReturnType"
+
+        let entries = Self::split_top_level_commas(inner);
+        if entries.len() <= MULTILINE_THRESHOLD {
+            return sig.to_string();
+        }
+
+        let mut out = String::from("(\n");
+        for entry in &entries {
+            out.push_str(param_indent);
+            out.push_str(entry);
+            out.push_str(",\n");
+        }
+        out.push_str(close_indent);
+        out.push(')');
+        if !after.is_empty() {
+            out.push(' ');
+            out.push_str(after);
+        }
+        out
+    }
+
     pub fn transpile_file(
         &mut self,
         rb_path: &Path,
@@ -359,7 +483,19 @@ impl SentinelTranspiler {
 
         // Type aliases
         for alias in &info.type_aliases {
-            rbs_output.push_str(&format!("{}{}\n", member_indent, alias));
+            // If the RHS of the alias is a record type with many entries, format it
+            // on multiple lines so that the generated file stays readable.
+            let formatted = if let Some(eq_pos) = alias.find(" = ") {
+                let lhs = &alias[..eq_pos + 3]; // "type foo = "
+                let rhs = alias[eq_pos + 3..].trim();
+                let field_indent = format!("{}  ", member_indent);
+                let formatted_rhs =
+                    Self::maybe_format_record(rhs, &field_indent, &member_indent);
+                format!("{}{}", lhs, formatted_rhs)
+            } else {
+                alias.clone()
+            };
+            rbs_output.push_str(&format!("{}{}\n", member_indent, formatted));
         }
 
         // Attributes
@@ -372,15 +508,19 @@ impl SentinelTranspiler {
 
         // Class methods
         for (name, sig) in &info.self_methods {
+            let param_indent = format!("{}  ", member_indent);
+            let formatted_sig = Self::maybe_format_sig(sig, &param_indent, &member_indent);
             rbs_output.push_str(&format!(
                 "{}def self.{}: {}\n",
-                member_indent, name, sig
+                member_indent, name, formatted_sig
             ));
         }
 
         // Instance methods
         for (name, sig) in &info.methods {
-            rbs_output.push_str(&format!("{}def {}: {}\n", member_indent, name, sig));
+            let param_indent = format!("{}  ", member_indent);
+            let formatted_sig = Self::maybe_format_sig(sig, &param_indent, &member_indent);
+            rbs_output.push_str(&format!("{}def {}: {}\n", member_indent, name, formatted_sig));
         }
 
         rbs_output.push_str(&format!("{}end\n", class_indent));
@@ -1117,5 +1257,208 @@ end
         assert!(SentinelTranspiler::has_content("  type error_code = String\n"));
         assert!(SentinelTranspiler::has_content("  attr_reader name: String\n"));
         assert!(!SentinelTranspiler::has_content("class Foo\nend\n"));
+    }
+
+    // --- Tests for multiline pretty-printing (> MULTILINE_THRESHOLD entries) ---
+
+    #[test]
+    fn test_record_type_alias_multiline_when_many_keys() {
+        let test_file = Path::new("/tmp/test_record_multiline.rb");
+        fs::write(
+            test_file,
+            "\
+class Applicant
+  # @rbs type applicant_local = {
+  #   external_id: String,
+  #   name: String,
+  #   email: String,
+  #   status: String,
+  # }
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        // Should be on multiple lines since there are 4 keys (> 3)
+        assert!(
+            result.contains("type applicant_local = {\n"),
+            "Expected opening brace on its own line, got: {}",
+            result
+        );
+        assert!(
+            result.contains("    external_id: String,\n"),
+            "Expected external_id on its own indented line, got: {}",
+            result
+        );
+        assert!(
+            result.contains("    name: String,\n"),
+            "Expected name on its own indented line, got: {}",
+            result
+        );
+        assert!(
+            result.contains("    email: String,\n"),
+            "Expected email on its own indented line, got: {}",
+            result
+        );
+        assert!(
+            result.contains("    status: String,\n"),
+            "Expected status on its own indented line, got: {}",
+            result
+        );
+        assert!(
+            result.contains("  }"),
+            "Expected closing brace at member_indent, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_record_type_alias_single_line_when_few_keys() {
+        let test_file = Path::new("/tmp/test_record_singleline.rb");
+        fs::write(
+            test_file,
+            "\
+class Foo
+  # @rbs type pair = { key: String, value: Integer }
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        // Only 2 keys — should stay on one line
+        assert!(
+            result.contains("type pair = { key: String, value: Integer }"),
+            "Expected single-line record with 2 keys, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_method_sig_multiline_when_many_params() {
+        let test_file = Path::new("/tmp/test_sig_multiline.rb");
+        fs::write(
+            test_file,
+            "\
+class Handler
+  #: (
+  #:   external_id: String,
+  #:   name: String,
+  #:   email: String,
+  #:   status: String
+  #: ) -> void
+  def call(external_id:, name:, email:, status:)
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        // 4 keyword params (> 3) — should be multi-line
+        assert!(
+            result.contains("def call: (\n"),
+            "Expected opening paren on its own line, got: {}",
+            result
+        );
+        assert!(
+            result.contains("    external_id: String,\n"),
+            "Expected external_id on its own indented line, got: {}",
+            result
+        );
+        assert!(
+            result.contains("    name: String,\n"),
+            "Expected name on its own indented line, got: {}",
+            result
+        );
+        assert!(
+            result.contains("    email: String,\n"),
+            "Expected email on its own indented line, got: {}",
+            result
+        );
+        assert!(
+            result.contains("    status: String,\n"),
+            "Expected status on its own indented line, got: {}",
+            result
+        );
+        assert!(
+            result.contains("  ) -> void\n"),
+            "Expected closing paren with return type, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_method_sig_single_line_when_few_params() {
+        let test_file = Path::new("/tmp/test_sig_singleline.rb");
+        fs::write(
+            test_file,
+            "\
+class Foo
+  #: (name: String, age: Integer, active: bool) -> void
+  def update(name:, age:, active:)
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        // Exactly 3 params — should stay on one line
+        assert!(
+            result.contains("def update: (name: String, age: Integer, active: bool) -> void"),
+            "Expected single-line sig with 3 params, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_self_method_sig_multiline_when_many_params() {
+        let test_file = Path::new("/tmp/test_self_sig_multiline.rb");
+        fs::write(
+            test_file,
+            "\
+class Builder
+  #: (name: String, age: Integer, email: String, role: Symbol) -> Builder
+  def self.create(name:, age:, email:, role:)
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        // 4 params — should be multi-line
+        assert!(
+            result.contains("def self.create: (\n"),
+            "Expected opening paren on its own line, got: {}",
+            result
+        );
+        assert!(
+            result.contains("  ) -> Builder\n"),
+            "Expected closing paren with return type, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_split_top_level_commas_respects_nesting() {
+        // Ensure commas inside nested brackets are not treated as separators.
+        let entries = SentinelTranspiler::split_top_level_commas(
+            "key: Hash[String, Integer], other: { a: String, b: Integer }",
+        );
+        assert_eq!(
+            entries,
+            vec![
+                "key: Hash[String, Integer]",
+                "other: { a: String, b: Integer }",
+            ]
+        );
     }
 }
