@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.7] - 2026-05-06
+
+### Fixed
+- **Strip MCP-style annotations from `# @rbs type` aliases too**: 0.3.6 stripped `@desc(...)`, `@example(...)`, `@min(...)`, `@format(...)`, etc. from `#:` method signatures, but `# @rbs type` aliases passed through verbatim. Steep rejected those tags inside record-type braces with the same `RBS::SyntaxError: cannot start a declaration, token=@desc` error, so consumers still needed per-file `ignore_signature` workarounds for any handler that put `@desc` on a record field. The strip now runs on type-alias bodies as well as method signatures. (#15)
+
+  Before:
+  ```rbs
+  type applicant_local = { external_id: String @desc(Stable applicant external_id) @example(app_123), email: String @format(email) @desc(Primary email) }
+  ```
+  After:
+  ```rbs
+  type applicant_local = { external_id: String, email: String }
+  ```
+
 ## [0.3.6] - 2026-05-06
 
 ### Fixed
