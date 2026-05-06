@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.6] - 2026-05-06
+
+### Fixed
+- **Strip MCP-style annotations from `.rbs` output**: Inline `#:` annotations such as `@desc(...)`, `@example(...)`, `@min(...)`, `@format(...)`, and `@requires(...)` are now removed from generated `.rbs` signatures. Steep previously rejected the output with `RBS::SyntaxError: cannot start a declaration, token=@desc`, forcing per-handler `ignore_signature` entries and hand-written stubs as a workaround. (#12)
+
+  Before:
+  ```rbs
+  def call: (applicant_id: String @desc(External_id of the applicant to move) @example(app_abc123)) -> output
+  ```
+  After:
+  ```rbs
+  def call: (applicant_id: String) -> output
+  ```
+
+  The annotations remain available to downstream consumers (e.g. `mcp_authorization`) which read them directly from the Ruby source via `Method#source_location`.
+
 ## [0.3.5] - 2026-05-01
 
 ### Changed

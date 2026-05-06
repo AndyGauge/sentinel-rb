@@ -36,6 +36,93 @@ impl SentinelTranspiler {
         &source[node.start_byte()..node.end_byte()]
     }
 
+    /// Strip MCP-style annotations (`@desc(...)`, `@example(...)`, `@min(...)`,
+    /// `@format(...)`, `@requires(...)`, etc.) from a `#:` signature. These are
+    /// valid in Ruby comments but not in RBS — Steep refuses to parse them.
+    /// Matches `@<word>(...)` where the parens are balanced.
+    fn strip_annotations(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out = String::with_capacity(s.len());
+        let mut last_copy = 0;
+        let mut i = 0;
+        let mut stripped = false;
+        while i < bytes.len() {
+            if bytes[i] == b'@' {
+                let mut j = i + 1;
+                while j < bytes.len()
+                    && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
+                {
+                    j += 1;
+                }
+                if j > i + 1 && j < bytes.len() && bytes[j] == b'(' {
+                    let mut depth = 1usize;
+                    let mut k = j + 1;
+                    while k < bytes.len() && depth > 0 {
+                        match bytes[k] {
+                            b'(' => depth += 1,
+                            b')' => depth -= 1,
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                    if depth == 0 {
+                        out.push_str(&s[last_copy..i]);
+                        i = k;
+                        last_copy = k;
+                        stripped = true;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        if !stripped {
+            return s.to_string();
+        }
+
+        out.push_str(&s[last_copy..]);
+
+        // Cleanup pass: collapse whitespace runs, drop spaces sitting next to
+        // brackets or commas, and remove trailing commas left dangling against
+        // a closing bracket once the annotation that followed them is gone.
+        let chars: Vec<char> = out.chars().collect();
+        let mut cleaned = String::with_capacity(out.len());
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if c.is_whitespace() {
+                while i < chars.len() && chars[i].is_whitespace() {
+                    i += 1;
+                }
+                let next = chars.get(i).copied();
+                let last = cleaned.chars().last();
+                let drop_after_open = matches!(last, Some('(') | Some('{') | Some('['));
+                let drop_before_close =
+                    matches!(next, Some(',') | Some(')') | Some('}') | Some(']'));
+                if next.is_some() && !drop_after_open && !drop_before_close {
+                    cleaned.push(' ');
+                }
+            } else if c == ',' {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                if matches!(chars.get(j), Some(')') | Some('}') | Some(']')) {
+                    i = j;
+                    continue;
+                }
+                cleaned.push(c);
+                i += 1;
+            } else {
+                cleaned.push(c);
+                i += 1;
+            }
+        }
+
+        cleaned
+    }
+
     /// Check if braces/brackets/parens are balanced and correctly matched
     fn is_balanced(s: &str) -> bool {
         let mut stack: Vec<char> = Vec::new();
@@ -177,6 +264,7 @@ impl SentinelTranspiler {
                         if let Some(name_node) = child.child_by_field_name("name") {
                             let method_name =
                                 Self::node_text(source, &name_node).to_string();
+                            let sig = Self::strip_annotations(&sig);
                             if singleton_context {
                                 info.self_methods.push((method_name, sig));
                             } else {
@@ -191,6 +279,7 @@ impl SentinelTranspiler {
                         if let Some(name_node) = child.child_by_field_name("name") {
                             let method_name =
                                 Self::node_text(source, &name_node).to_string();
+                            let sig = Self::strip_annotations(&sig);
                             info.self_methods.push((method_name, sig));
                         }
                     }
@@ -212,6 +301,7 @@ impl SentinelTranspiler {
                             "attr_reader" | "attr_writer" | "attr_accessor"
                         ) {
                             if let Some(type_sig) = pending_annotation.take() {
+                                let type_sig = Self::strip_annotations(&type_sig);
                                 if let Some(args_node) =
                                     child.child_by_field_name("arguments")
                                 {
@@ -1444,6 +1534,179 @@ end
             result.contains("  ) -> Builder\n"),
             "Expected closing paren with return type, got: {}",
             result
+        );
+    }
+
+    // --- Tests for issue #12: stripping @desc/@example/etc. annotations ---
+
+    #[test]
+    fn test_strip_annotations_issue_12_example() {
+        let test_file = Path::new("/tmp/test_strip_ann_issue12.rb");
+        fs::write(
+            test_file,
+            "\
+class MoveApplicant
+  #: (
+  #:   applicant_id: String
+  #:     @desc(External_id of the applicant to move)
+  #:     @example(app_abc123),
+  #: ) -> output
+  def call(**params)
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            !result.contains("@desc"),
+            "Expected @desc to be stripped, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("@example"),
+            "Expected @example to be stripped, got: {}",
+            result
+        );
+        assert!(
+            result.contains("def call: (applicant_id: String) -> output"),
+            "Expected clean signature, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_strip_multiple_annotation_kinds() {
+        let test_file = Path::new("/tmp/test_strip_multi_kinds.rb");
+        fs::write(
+            test_file,
+            "\
+class Validator
+  #: (
+  #:   age: Integer @min(0) @max(120) @desc(Age in years),
+  #:   email: String @format(email) @requires(domain),
+  #: ) -> bool
+  def call(age:, email:)
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        for tag in ["@min", "@max", "@desc", "@format", "@requires"] {
+            assert!(
+                !result.contains(tag),
+                "Expected {} to be stripped, got: {}",
+                tag,
+                result
+            );
+        }
+        assert!(
+            result.contains("def call: (age: Integer, email: String) -> bool"),
+            "Expected clean two-param signature, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_strip_annotations_on_attr() {
+        let test_file = Path::new("/tmp/test_strip_attr.rb");
+        fs::write(
+            test_file,
+            "class Foo\n  #: String @desc(The display name)\n  attr_reader :name\nend\n",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            !result.contains("@desc"),
+            "Expected @desc to be stripped from attr, got: {}",
+            result
+        );
+        assert!(
+            result.contains("attr_reader name: String"),
+            "Expected clean attr_reader, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_strip_annotations_on_singleton_method() {
+        let test_file = Path::new("/tmp/test_strip_singleton.rb");
+        fs::write(
+            test_file,
+            "class Tool\n  #: (id: String @desc(External id)) -> Tool\n  def self.call(id:)\n  end\nend\n",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("def self.call: (id: String) -> Tool"),
+            "Expected clean self.call, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_strip_does_not_touch_signatures_without_annotations() {
+        // Same input as `test_multiline_annotation` — must produce identical
+        // output now that strip_annotations short-circuits when nothing matches.
+        let test_file = Path::new("/tmp/test_strip_noop.rb");
+        fs::write(
+            test_file,
+            "\
+class MultilineTest
+  #: (
+  #:   name: String,
+  #:   age: Integer,
+  #:   ?email: String?
+  #: ) -> Hash[Symbol, untyped]
+  def self.call(name:, age:, email: nil)
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("def self.call: ( name: String, age: Integer, ?email: String? ) -> Hash[Symbol, untyped]"),
+            "Annotation-free signature should be unchanged, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_strip_annotations_helper_unit() {
+        assert_eq!(
+            SentinelTranspiler::strip_annotations(
+                "(applicant_id: String @desc(External id) @example(app_abc123)) -> output"
+            ),
+            "(applicant_id: String) -> output"
+        );
+        // Mid-string trailing comma between params
+        assert_eq!(
+            SentinelTranspiler::strip_annotations(
+                "(a: Integer @min(0), b: String @desc(name)) -> void"
+            ),
+            "(a: Integer, b: String) -> void"
+        );
+        // No annotation: returned unchanged
+        assert_eq!(
+            SentinelTranspiler::strip_annotations("(a: Integer, b: String) -> void"),
+            "(a: Integer, b: String) -> void"
+        );
+        // Stray @ that is not an annotation: left alone
+        assert_eq!(
+            SentinelTranspiler::strip_annotations("(email: String) -> bool"),
+            "(email: String) -> bool"
         );
     }
 
