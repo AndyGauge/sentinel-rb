@@ -216,6 +216,7 @@ impl SentinelTranspiler {
                 if !continues {
                     let alias = pending_type_alias.take().unwrap();
                     if Self::is_balanced(&alias) && !alias.ends_with('|') {
+                        let alias = Self::strip_annotations(&alias);
                         info.type_aliases.push(format!("type {}", alias));
                     }
                 }
@@ -340,6 +341,7 @@ impl SentinelTranspiler {
         // Finalize any remaining pending type alias
         if let Some(alias) = pending_type_alias {
             if Self::is_balanced(&alias) && !alias.ends_with('|') {
+                let alias = Self::strip_annotations(&alias);
                 info.type_aliases.push(format!("type {}", alias));
             }
         }
@@ -1631,6 +1633,80 @@ end
         assert!(
             result.contains("attr_reader name: String"),
             "Expected clean attr_reader, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_strip_annotations_on_type_alias_record() {
+        // Regression: 0.3.6 stripped @desc/@example/etc. from method signatures
+        // but left them inside `# @rbs type` aliases, where Steep also rejects
+        // them with `RBS::SyntaxError: cannot start a declaration, token=@desc`
+        // when they appear inside a record-type's `{ ... }`.
+        let test_file = Path::new("/tmp/test_strip_type_alias_record.rb");
+        fs::write(
+            test_file,
+            "\
+class Applicant
+  # @rbs type applicant_local = {
+  #   external_id: String @desc(Stable applicant external_id) @example(app_123) @read_only(),
+  #   email: String @format(email) @desc(Primary email) @example(jane@example.com),
+  # }
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        for tag in ["@desc", "@example", "@read_only", "@format"] {
+            assert!(
+                !result.contains(tag),
+                "Expected {} to be stripped from type alias, got: {}",
+                tag,
+                result
+            );
+        }
+        assert!(
+            result.contains("external_id: String"),
+            "Expected external_id field preserved, got: {}",
+            result
+        );
+        assert!(
+            result.contains("email: String"),
+            "Expected email field preserved, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_strip_annotations_on_single_line_type_alias() {
+        let test_file = Path::new("/tmp/test_strip_type_alias_single.rb");
+        fs::write(
+            test_file,
+            "\
+class Funnel
+  # @rbs type funnel_ref = { external_id: String @desc(Opening external_id) @example(funnel_abc), title: String @desc(Title shown in UI) }
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            !result.contains("@desc"),
+            "Expected @desc to be stripped from single-line alias, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("@example"),
+            "Expected @example to be stripped from single-line alias, got: {}",
+            result
+        );
+        assert!(
+            result.contains("type funnel_ref"),
+            "Expected type alias preserved, got: {}",
             result
         );
     }
