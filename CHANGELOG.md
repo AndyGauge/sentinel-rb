@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.4.0] - 2026-05-07
+
+### Added
+- **`# @rbs import <name>` directive**: Resolves `sig/shared/<name>.rbs`, parses bare RBS type definitions inside, strips MCP-style annotations (`@desc`, `@example`, etc.), and inlines them into the generated `.rbs` output. Aligns sentinel with `mcp_authorization`, which already supports the same `# @rbs import` convention for schema compilation. Before this change, sentinel silently ignored the directive, causing Steep to fail with `Unknown alias name` errors when a handler used `# @rbs import error` instead of duplicating the type inline. (#17)
+
+  ```ruby
+  # sig/shared/error.rbs
+  type error = { code: String, message: String }
+
+  # app/handlers/foo.rb
+  class Foo
+    # @rbs import error
+
+    #: (error) -> bool
+    def call(err); end
+  end
+  ```
+
+  Generated:
+  ```rbs
+  class Foo
+    type error = { code: String, message: String }
+    def call: (error) -> bool
+  end
+  ```
+
+- **`shared_paths` config key**: Customize where `# @rbs import` resolves shared types from. Defaults to `["sig/shared"]`. Existing `.sentinel.toml` files without this key continue to work unchanged.
+
+### Notes
+- `# @rbs import` directives must live inside the `class`/`module` body — same constraint as `# @rbs type`. Top-of-file placement (above the class) is silently dropped.
+
 ## [0.3.7] - 2026-05-06
 
 ### Fixed
