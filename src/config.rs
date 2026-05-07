@@ -8,6 +8,12 @@ const CONFIG_FILE: &str = ".sentinel.toml";
 pub struct SentinelConfig {
     pub folders: Vec<String>,
     pub output: String,
+    #[serde(default = "default_shared_paths")]
+    pub shared_paths: Vec<String>,
+}
+
+fn default_shared_paths() -> Vec<String> {
+    vec!["sig/shared".to_string()]
 }
 
 impl Default for SentinelConfig {
@@ -15,6 +21,7 @@ impl Default for SentinelConfig {
         Self {
             folders: vec!["app".to_string()],
             output: "sig/generated".to_string(),
+            shared_paths: default_shared_paths(),
         }
     }
 }
@@ -80,5 +87,10 @@ impl SentinelConfig {
     /// Return folder paths.
     pub fn folder_paths(&self) -> Vec<PathBuf> {
         self.folders.iter().map(PathBuf::from).collect()
+    }
+
+    /// Return shared type paths.
+    pub fn shared_type_paths(&self) -> Vec<PathBuf> {
+        self.shared_paths.iter().map(PathBuf::from).collect()
     }
 }

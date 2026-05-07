@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 use walkdir::WalkDir;
 
-pub fn run(app_path: &Path, output_path: &Path) -> bool {
+pub fn run(app_path: &Path, output_path: &Path, shared_paths: &[PathBuf]) -> bool {
     let start = Instant::now();
     let app_root = app_path
         .canonicalize()
@@ -45,6 +45,7 @@ pub fn run(app_path: &Path, output_path: &Path) -> bool {
 
     files.par_iter().for_each(|path| {
         let mut transpiler = SentinelTranspiler::new();
+        transpiler.set_shared_paths(shared_paths.to_vec());
 
         match transpiler.transpile_file(path) {
             Ok(rbs_content) => {

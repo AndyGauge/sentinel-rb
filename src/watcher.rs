@@ -14,6 +14,7 @@ pub struct SentinelWatcher {
     receiver: mpsc::Receiver<notify::Result<notify::Event>>,
     app_roots: Vec<PathBuf>,
     output_path: PathBuf,
+    shared_paths: Vec<PathBuf>,
     plugins: Vec<Box<dyn SentinelPlugin>>,
 }
 
@@ -41,6 +42,7 @@ impl SentinelWatcher {
             receiver: rx,
             app_roots,
             output_path: config.output_path(),
+            shared_paths: config.shared_type_paths(),
             plugins: Vec::new(),
         })
     }
@@ -68,6 +70,7 @@ impl SentinelWatcher {
     /// The main event loop that processes file changes and triggers transpilation
     pub async fn run(mut self) {
         let mut transpiler = SentinelTranspiler::new();
+        transpiler.set_shared_paths(self.shared_paths.clone());
         for root in &self.app_roots {
             println!("🚀 Sentinel standing guard over {:?}...", root);
         }

@@ -18,6 +18,7 @@ struct ClassInfo {
 
 pub struct SentinelTranspiler {
     parser: Parser,
+    shared_paths: Vec<std::path::PathBuf>,
 }
 
 impl SentinelTranspiler {
@@ -28,7 +29,67 @@ impl SentinelTranspiler {
             .set_language(lang)
             .expect("Error loading Ruby grammar");
 
-        Self { parser }
+        Self {
+            parser,
+            shared_paths: Vec::new(),
+        }
+    }
+
+    /// Set the directories to search for shared `.rbs` type files (used by `# @rbs import`).
+    pub fn set_shared_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.shared_paths = paths;
+    }
+
+    /// Resolve `# @rbs import <name>` by searching shared_paths for `<name>.rbs`,
+    /// reading its contents, and returning the type aliases found inside.
+    fn resolve_import(shared_paths: &[std::path::PathBuf], name: &str) -> Vec<String> {
+        for dir in shared_paths {
+            let file = dir.join(format!("{}.rbs", name));
+            if let Ok(contents) = fs::read_to_string(&file) {
+                return Self::parse_shared_rbs(&contents);
+            }
+        }
+        eprintln!("  [import] Could not resolve '{}' from shared paths", name);
+        Vec::new()
+    }
+
+    /// Parse a bare `.rbs` file from `sig/shared/` and extract type alias definitions.
+    /// Expected format: `type foo = { ... }` (may span multiple lines).
+    /// Strips `@desc(...)` and similar annotations before returning.
+    fn parse_shared_rbs(contents: &str) -> Vec<String> {
+        let mut aliases = Vec::new();
+        let mut current: Option<String> = None;
+
+        let finalize = |raw: String, out: &mut Vec<String>| {
+            if Self::is_balanced(&raw) {
+                let stripped = Self::strip_annotations(&raw);
+                out.push(format!("type {}", stripped));
+            }
+        };
+
+        for line in contents.lines() {
+            let trimmed = line.trim();
+
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("type ") {
+                if let Some(prev) = current.take() {
+                    finalize(prev, &mut aliases);
+                }
+                current = Some(rest.to_string());
+            } else if let Some(ref mut cur) = current {
+                cur.push(' ');
+                cur.push_str(trimmed);
+            }
+        }
+
+        if let Some(prev) = current {
+            finalize(prev, &mut aliases);
+        }
+
+        aliases
     }
 
     /// Extract the text of a node from source
@@ -149,7 +210,7 @@ impl SentinelTranspiler {
     }
 
     /// Collect structure from the AST: module nesting, class name, and annotated methods.
-    fn collect_structure(source: &str, root: Node) -> ClassInfo {
+    fn collect_structure(source: &str, root: Node, shared_paths: &[std::path::PathBuf]) -> ClassInfo {
         let mut module_stack = Vec::new();
         let mut info = ClassInfo {
             modules: Vec::new(),
@@ -160,7 +221,7 @@ impl SentinelTranspiler {
             type_aliases: Vec::new(),
             attributes: Vec::new(),
         };
-        Self::walk(source, root, &mut module_stack, &mut info);
+        Self::walk(source, root, &mut module_stack, &mut info, shared_paths);
         info
     }
 
@@ -187,6 +248,7 @@ impl SentinelTranspiler {
         children: &[Node],
         info: &mut ClassInfo,
         singleton_context: bool,
+        shared_paths: &[std::path::PathBuf],
     ) {
         let mut pending_annotation: Option<String> = None;
         let mut pending_type_alias: Option<String> = None;
@@ -229,6 +291,14 @@ impl SentinelTranspiler {
                     // Check for @rbs type alias
                     if let Some(rest) = text.strip_prefix("# @rbs type ") {
                         pending_type_alias = Some(rest.trim().to_string());
+                        pending_annotation = None;
+                    } else if let Some(name) = text.strip_prefix("# @rbs import ") {
+                        // Import shared type(s) from sig/shared/<name>.rbs
+                        let name = name.trim();
+                        let imported = Self::resolve_import(shared_paths, name);
+                        for alias in imported {
+                            info.type_aliases.push(alias);
+                        }
                         pending_annotation = None;
                     } else if let Some(ref mut alias) = pending_type_alias {
                         // Continue multi-line type alias
@@ -288,7 +358,7 @@ impl SentinelTranspiler {
                 "singleton_class" => {
                     // class << self — methods inside are class methods
                     let inner_children = Self::flatten_children(child);
-                    Self::scan_body(source, &inner_children, info, true);
+                    Self::scan_body(source, &inner_children, info, true, shared_paths);
                     pending_annotation = None;
                     pending_type_alias = None;
                 }
@@ -352,6 +422,7 @@ impl SentinelTranspiler {
         node: Node,
         module_stack: &mut Vec<String>,
         info: &mut ClassInfo,
+        shared_paths: &[std::path::PathBuf],
     ) {
         match node.kind() {
             "module" => {
@@ -365,14 +436,14 @@ impl SentinelTranspiler {
 
                     let mut cursor = node.walk();
                     for child in node.children(&mut cursor) {
-                        Self::walk(source, child, module_stack, info);
+                        Self::walk(source, child, module_stack, info, shared_paths);
                     }
 
                     // If no class was found inside, check if this module
                     // itself contains annotated content (e.g. concerns)
                     if info.class_name == "UnknownClass" {
                         let children = Self::flatten_children(node);
-                        Self::scan_body(source, &children, info, false);
+                        Self::scan_body(source, &children, info, false, shared_paths);
                         if !info.methods.is_empty()
                             || !info.self_methods.is_empty()
                             || !info.type_aliases.is_empty()
@@ -411,7 +482,7 @@ impl SentinelTranspiler {
 
                 // Flatten direct children + body_statement children, then scan
                 let children = Self::flatten_children(node);
-                Self::scan_body(source, &children, info, false);
+                Self::scan_body(source, &children, info, false, shared_paths);
 
                 return;
             }
@@ -420,7 +491,7 @@ impl SentinelTranspiler {
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            Self::walk(source, child, module_stack, info);
+            Self::walk(source, child, module_stack, info, shared_paths);
         }
     }
 
@@ -556,7 +627,7 @@ impl SentinelTranspiler {
         let source = fs::read_to_string(rb_path)?;
         let tree = self.parser.parse(&source, None).ok_or("Failed to parse")?;
 
-        let info = Self::collect_structure(&source, tree.root_node());
+        let info = Self::collect_structure(&source, tree.root_node(), &self.shared_paths);
 
         let mut rbs_output = String::new();
         rbs_output.push_str("# Generated by Sentinel - Do not edit manually\n\n");

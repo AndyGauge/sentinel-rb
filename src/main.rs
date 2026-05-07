@@ -18,15 +18,17 @@ async fn main() -> Result<()> {
         "init" => {
             let config = SentinelConfig::ensure_exists()?;
             std::fs::create_dir_all(config.output_path())?;
+            let shared = config.shared_type_paths();
             for folder in config.folder_paths() {
-                init::run(&folder, &config.output_path());
+                init::run(&folder, &config.output_path(), &shared);
             }
         }
         "check" => {
             let config = SentinelConfig::load()?;
+            let shared = config.shared_type_paths();
             let mut all_ok = true;
             for folder in config.folder_paths() {
-                if !check::run(&folder, &config.output_path()) {
+                if !check::run(&folder, &config.output_path(), &shared) {
                     all_ok = false;
                 }
             }
@@ -37,8 +39,9 @@ async fn main() -> Result<()> {
         "watch" => {
             let config = SentinelConfig::ensure_exists()?;
             std::fs::create_dir_all(config.output_path())?;
+            let shared = config.shared_type_paths();
             for folder in config.folder_paths() {
-                init::run(&folder, &config.output_path());
+                init::run(&folder, &config.output_path(), &shared);
             }
             let watcher = SentinelWatcher::new(&config)?.with_plugins();
             watcher.run().await;
