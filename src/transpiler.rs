@@ -483,7 +483,7 @@ impl SentinelTranspiler {
                             sub_modules: Vec::new(),
                         };
                         let children = Self::flatten_children(node);
-                        Self::scan_body(source, &children, &mut parent_info, false);
+                        Self::scan_body(source, &children, &mut parent_info, false, shared_paths);
                         if !parent_info.methods.is_empty()
                             || !parent_info.self_methods.is_empty()
                             || !parent_info.type_aliases.is_empty()

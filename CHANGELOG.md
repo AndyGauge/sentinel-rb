@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.1] - 2026-05-08
+
+### Fixed
+- **Sub-module RBS generation for concerns**: When a Ruby module contains both annotated methods and a nested module (e.g. `module ClassMethods` inside `McpMigrated`), sentinel now emits both the parent module's methods and the nested module in the generated `.rbs` output. Previously, the nested module's capture would shadow the parent, silently dropping the parent's methods (e.g. `initialize`). Discovered via `Tool::Concerns::McpMigrated` in the Hire monolith, which uses a plain-Ruby `def self.included(base)` pattern with `module ClassMethods`. (#19)
+
 ## [0.4.0] - 2026-05-07
 
 ### Added
