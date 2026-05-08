@@ -6,6 +6,14 @@ use tree_sitter::{Node, Parser};
 /// are emitted on multiple lines in the generated `.rbs` output.
 const MULTILINE_THRESHOLD: usize = 3;
 
+struct SubModuleInfo {
+    name: String,
+    methods: Vec<(String, String)>,
+    self_methods: Vec<(String, String)>,
+    type_aliases: Vec<String>,
+    attributes: Vec<(String, String, String)>,
+}
+
 struct ClassInfo {
     modules: Vec<String>,
     class_name: String,
@@ -14,6 +22,7 @@ struct ClassInfo {
     self_methods: Vec<(String, String)>,
     type_aliases: Vec<String>,
     attributes: Vec<(String, String, String)>, // (attr_kind, attr_name, type)
+    sub_modules: Vec<SubModuleInfo>,
 }
 
 pub struct SentinelTranspiler {
@@ -220,6 +229,7 @@ impl SentinelTranspiler {
             self_methods: Vec::new(),
             type_aliases: Vec::new(),
             attributes: Vec::new(),
+            sub_modules: Vec::new(),
         };
         Self::walk(source, root, &mut module_stack, &mut info, shared_paths);
         info
@@ -457,6 +467,50 @@ impl SentinelTranspiler {
                             info.is_module = true;
                             return;
                         }
+                    } else if info.is_module {
+                        // A nested module (e.g. ClassMethods) was already captured.
+                        // Check if the parent module also has its own annotated methods.
+                        // If so, demote the nested module to a sub_module and promote
+                        // the parent as the primary module.
+                        let mut parent_info = ClassInfo {
+                            modules: Vec::new(),
+                            class_name: "UnknownClass".to_string(),
+                            is_module: false,
+                            methods: Vec::new(),
+                            self_methods: Vec::new(),
+                            type_aliases: Vec::new(),
+                            attributes: Vec::new(),
+                            sub_modules: Vec::new(),
+                        };
+                        let children = Self::flatten_children(node);
+                        Self::scan_body(source, &children, &mut parent_info, false, shared_paths);
+                        if !parent_info.methods.is_empty()
+                            || !parent_info.self_methods.is_empty()
+                            || !parent_info.type_aliases.is_empty()
+                            || !parent_info.attributes.is_empty()
+                        {
+                            // Move the previously captured nested module into sub_modules
+                            let nested = SubModuleInfo {
+                                name: info.class_name.clone(),
+                                methods: info.methods.drain(..).collect(),
+                                self_methods: info.self_methods.drain(..).collect(),
+                                type_aliases: info.type_aliases.drain(..).collect(),
+                                attributes: info.attributes.drain(..).collect(),
+                            };
+                            info.sub_modules.push(nested);
+                            // Replace with parent module's content
+                            info.methods = parent_info.methods;
+                            info.self_methods = parent_info.self_methods;
+                            info.type_aliases = parent_info.type_aliases;
+                            info.attributes = parent_info.attributes;
+                            for _ in 0..pushed {
+                                module_stack.pop();
+                            }
+                            info.modules = module_stack.clone();
+                            info.class_name = name.to_string();
+                            info.is_module = true;
+                            return;
+                        }
                     }
 
                     for _ in 0..pushed {
@@ -684,6 +738,51 @@ impl SentinelTranspiler {
             let param_indent = format!("{}  ", member_indent);
             let formatted_sig = Self::maybe_format_sig(sig, &param_indent, &member_indent);
             rbs_output.push_str(&format!("{}def {}: {}\n", member_indent, name, formatted_sig));
+        }
+
+        // Sub-modules (e.g. ClassMethods inside a concern)
+        for sub in &info.sub_modules {
+            let sub_indent = "  ".repeat(depth + 1);
+            let sub_member_indent = "  ".repeat(depth + 2);
+            rbs_output.push_str(&format!("{}module {}\n", sub_indent, sub.name));
+            for alias in &sub.type_aliases {
+                let formatted = if let Some(eq_pos) = alias.find(" = ") {
+                    let lhs = &alias[..eq_pos + 3];
+                    let rhs = alias[eq_pos + 3..].trim();
+                    let field_indent = format!("{}  ", sub_member_indent);
+                    let formatted_rhs =
+                        Self::maybe_format_record(rhs, &field_indent, &sub_member_indent);
+                    format!("{}{}", lhs, formatted_rhs)
+                } else {
+                    alias.clone()
+                };
+                rbs_output.push_str(&format!("{}{}\n", sub_member_indent, formatted));
+            }
+            for (kind, name, type_sig) in &sub.attributes {
+                rbs_output.push_str(&format!(
+                    "{}{} {}: {}\n",
+                    sub_member_indent, kind, name, type_sig
+                ));
+            }
+            for (name, sig) in &sub.self_methods {
+                let param_indent = format!("{}  ", sub_member_indent);
+                let formatted_sig =
+                    Self::maybe_format_sig(sig, &param_indent, &sub_member_indent);
+                rbs_output.push_str(&format!(
+                    "{}def self.{}: {}\n",
+                    sub_member_indent, name, formatted_sig
+                ));
+            }
+            for (name, sig) in &sub.methods {
+                let param_indent = format!("{}  ", sub_member_indent);
+                let formatted_sig =
+                    Self::maybe_format_sig(sig, &param_indent, &sub_member_indent);
+                rbs_output.push_str(&format!(
+                    "{}def {}: {}\n",
+                    sub_member_indent, name, formatted_sig
+                ));
+            }
+            rbs_output.push_str(&format!("{}end\n", sub_indent));
         }
 
         rbs_output.push_str(&format!("{}end\n", class_indent));
@@ -1410,6 +1509,65 @@ end
         assert!(
             result.contains("def perform: () -> void"),
             "Expected Service's method, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_module_with_sub_module_class_methods() {
+        let test_file = Path::new("/tmp/test_module_sub_module.rb");
+        fs::write(
+            test_file,
+            "\
+module Tool
+  module Concerns
+    module McpMigrated
+      #: (server_context: untyped) -> void
+      def initialize(server_context:)
+      end
+
+      module ClassMethods
+        #: (current_user: untyped, current_account: untyped, params: untyped) -> instance
+        def from_legacy(current_user:, current_account:, params:)
+        end
+      end
+    end
+  end
+end
+",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(
+            result.contains("module Tool\n"),
+            "Expected module Tool, got: {}",
+            result
+        );
+        assert!(
+            result.contains("  module Concerns\n"),
+            "Expected module Concerns, got: {}",
+            result
+        );
+        assert!(
+            result.contains("    module McpMigrated\n"),
+            "Expected module McpMigrated, got: {}",
+            result
+        );
+        assert!(
+            result.contains("def initialize: (server_context: untyped) -> void"),
+            "Expected initialize method on parent module, got: {}",
+            result
+        );
+        assert!(
+            result.contains("module ClassMethods\n"),
+            "Expected ClassMethods sub-module, got: {}",
+            result
+        );
+        assert!(
+            result.contains("def from_legacy: (current_user: untyped, current_account: untyped, params: untyped) -> instance"),
+            "Expected from_legacy in ClassMethods, got: {}",
             result
         );
     }
