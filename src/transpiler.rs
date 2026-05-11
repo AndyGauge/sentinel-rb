@@ -83,9 +83,19 @@ impl SentinelTranspiler {
             return;
         }
 
+        // Mark every co-located type as seen so the reference loop below
+        // won't recurse into them — this call will emit them in its final extend.
+        for alias in &aliases {
+            if let Some(defined) = alias
+                .strip_prefix("type ")
+                .and_then(|rest| rest.split_whitespace().next())
+            {
+                seen.insert(defined.to_string());
+            }
+        }
+
         // Scan the aliases for references to other shared types
         for alias in &aliases {
-            // Extract the type name being defined (e.g. "foo" from "type foo = { ... }")
             let defined_name = alias
                 .strip_prefix("type ")
                 .and_then(|rest| rest.split_whitespace().next())
@@ -93,7 +103,6 @@ impl SentinelTranspiler {
 
             for available_name in available {
                 if available_name != defined_name && !seen.contains(available_name) {
-                    // Check if this available type name appears in the alias body
                     if Self::references_type(alias, available_name) {
                         Self::resolve_import_recursive(shared_paths, available_name, resolved, seen, available);
                     }
@@ -101,22 +110,8 @@ impl SentinelTranspiler {
             }
         }
 
-        // Add our aliases after dependencies, skipping any already emitted
-        // (can happen when an exact-file match returns multiple types and one
-        // was already resolved via a recursive call from a sibling alias).
-        for alias in aliases {
-            let name = alias
-                .strip_prefix("type ")
-                .and_then(|rest| rest.split_whitespace().next())
-                .unwrap_or("");
-            if !resolved.iter().any(|r| {
-                r.strip_prefix("type ")
-                    .and_then(|rest| rest.split_whitespace().next())
-                    .map_or(false, |n| n == name)
-            }) {
-                resolved.push(alias);
-            }
-        }
+        // Add our aliases after dependencies (so referenced types are defined first)
+        resolved.extend(aliases);
     }
 
     /// Resolve a single import by name. First tries `<name>.rbs` (exact file match),
