@@ -101,8 +101,22 @@ impl SentinelTranspiler {
             }
         }
 
-        // Add our aliases after dependencies (so referenced types are defined first)
-        resolved.extend(aliases);
+        // Add our aliases after dependencies, skipping any already emitted
+        // (can happen when an exact-file match returns multiple types and one
+        // was already resolved via a recursive call from a sibling alias).
+        for alias in aliases {
+            let name = alias
+                .strip_prefix("type ")
+                .and_then(|rest| rest.split_whitespace().next())
+                .unwrap_or("");
+            if !resolved.iter().any(|r| {
+                r.strip_prefix("type ")
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .map_or(false, |n| n == name)
+            }) {
+                resolved.push(alias);
+            }
+        }
     }
 
     /// Resolve a single import by name. First tries `<name>.rbs` (exact file match),
@@ -2255,6 +2269,10 @@ end
 
         assert!(result.contains("type inner ="), "Expected inner, got: {}", result);
         assert!(result.contains("type bundle ="), "Expected bundle, got: {}", result);
+
+        // No duplicates — inner should appear exactly once
+        let count = result.matches("type inner =").count();
+        assert_eq!(count, 1, "Expected inner exactly once, found {} times in: {}", count, result);
     }
 
     #[test]
