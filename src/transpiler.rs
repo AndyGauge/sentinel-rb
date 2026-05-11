@@ -59,7 +59,7 @@ impl SentinelTranspiler {
         let mut seen = std::collections::HashSet::new();
         // Build the index of all available type names once, then pass it through
         // the recursion so we don't re-read every .rbs file at each level of DFS.
-        let available = Self::index_shared_types(shared_paths);
+        let available: std::collections::BTreeSet<String> = Self::index_shared_types(shared_paths);
         Self::resolve_import_recursive(shared_paths, name, &mut resolved, &mut seen, &available);
         resolved
     }
@@ -69,7 +69,7 @@ impl SentinelTranspiler {
         name: &str,
         resolved: &mut Vec<String>,
         seen: &mut std::collections::HashSet<String>,
-        available: &std::collections::HashSet<String>,
+        available: &std::collections::BTreeSet<String>,
     ) {
         // Insert before resolution for cycle detection and to suppress
         // repeated "Could not resolve" warnings for the same name.
@@ -160,8 +160,8 @@ impl SentinelTranspiler {
     }
 
     /// Collect all type names defined across all `.rbs` files in shared_paths.
-    fn index_shared_types(shared_paths: &[std::path::PathBuf]) -> std::collections::HashSet<String> {
-        let mut names = std::collections::HashSet::new();
+    fn index_shared_types(shared_paths: &[std::path::PathBuf]) -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
         for dir in shared_paths {
             if let Ok(entries) = fs::read_dir(dir) {
                 for entry in entries.flatten() {
