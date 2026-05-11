@@ -71,8 +71,8 @@ impl SentinelTranspiler {
         seen: &mut std::collections::HashSet<String>,
         available: &std::collections::HashSet<String>,
     ) {
-        // Insert before resolution so that even if the type can't be found,
-        // we won't spam repeated "Could not resolve" warnings for the same name.
+        // Insert before resolution for cycle detection and to suppress
+        // repeated "Could not resolve" warnings for the same name.
         if !seen.insert(name.to_string()) {
             return; // already resolved or in progress — avoid cycles
         }
@@ -83,18 +83,10 @@ impl SentinelTranspiler {
             return;
         }
 
-        // Mark every co-located type as seen so the reference loop below
-        // won't recurse into them — this call will emit them in its final extend.
-        for alias in &aliases {
-            if let Some(defined) = alias
-                .strip_prefix("type ")
-                .and_then(|rest| rest.split_whitespace().next())
-            {
-                seen.insert(defined.to_string());
-            }
-        }
-
-        // Scan the aliases for references to other shared types
+        // Scan the aliases for references to other shared types.
+        // Co-located types (same file) are NOT pre-marked in seen, so if alias A
+        // references co-located alias B, the recursion resolves and emits B first,
+        // guaranteeing topological order regardless of file order.
         for alias in &aliases {
             let defined_name = alias
                 .strip_prefix("type ")
@@ -110,8 +102,19 @@ impl SentinelTranspiler {
             }
         }
 
-        // Add our aliases after dependencies (so referenced types are defined first)
-        resolved.extend(aliases);
+        // Emit aliases, skipping co-located types already emitted by recursive calls.
+        // The primary type (name) was inserted into seen at entry — use defined == name
+        // to ensure it's always emitted. For co-located types, seen.insert returns false
+        // if already resolved above, preventing duplicates.
+        for alias in aliases {
+            let defined = alias
+                .strip_prefix("type ")
+                .and_then(|rest| rest.split_whitespace().next())
+                .unwrap_or("");
+            if defined == name || seen.insert(defined.to_string()) {
+                resolved.push(alias);
+            }
+        }
     }
 
     /// Resolve a single import by name. First tries `<name>.rbs` (exact file match),
@@ -2268,6 +2271,37 @@ end
         // No duplicates — inner should appear exactly once
         let count = result.matches("type inner =").count();
         assert_eq!(count, 1, "Expected inner exactly once, found {} times in: {}", count, result);
+    }
+
+    #[test]
+    fn test_colocated_types_reversed_file_order() {
+        let tmp = TempDir::new().unwrap();
+        let shared_dir = tmp.path().join("shared");
+        fs::create_dir_all(&shared_dir).unwrap();
+
+        // bundle is defined BEFORE inner in the file — dependency order is reversed
+        fs::write(
+            shared_dir.join("bundle.rbs"),
+            "type bundle = { item: inner }\n\ntype inner = { id: String }\n",
+        ).unwrap();
+
+        let test_file = tmp.path().join("test.rb");
+        fs::write(
+            &test_file,
+            "class Foo\n  # @rbs import bundle\n\n  #: () -> bundle\n  def call\n  end\nend\n",
+        ).unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        transpiler.set_shared_paths(vec![shared_dir.clone()]);
+        let result = transpiler.transpile_file(&test_file).unwrap();
+
+        assert!(result.contains("type inner ="), "Expected inner, got: {}", result);
+        assert!(result.contains("type bundle ="), "Expected bundle, got: {}", result);
+
+        // inner must appear before bundle even though file order is reversed
+        let inner_pos = result.find("type inner =").unwrap();
+        let bundle_pos = result.find("type bundle =").unwrap();
+        assert!(inner_pos < bundle_pos, "inner should appear before bundle (dependency order), got: {}", result);
     }
 
     #[test]
