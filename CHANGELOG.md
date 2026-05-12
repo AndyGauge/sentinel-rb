@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.4.2] - 2026-05-11
+
+### Added
+- **Recursive import resolution**: `# @rbs import` now recursively resolves nested type references. When an imported type references other types defined in `sig/shared/`, those dependencies are automatically resolved, stripped of MCP annotations, and inlined in the generated `.rbs` output — emitted before the types that reference them. Cycle detection prevents infinite loops. Previously, only the directly imported type was expanded; nested references were left as bare names, causing Steep `RBS::UnknownTypeName` errors. (#21)
+
+  ```ruby
+  # sig/shared/funnel.rbs
+  type stage_ref = { id: String @desc(Stage ID), title: String }
+
+  # sig/shared/funnel_result.rbs
+  type funnel_result = { title: String, ?stages: Array[stage_ref] }
+  ```
+
+  ```ruby
+  # app/services/tool/get_funnel.rb
+  # @rbs import funnel_result   # ← only imports the top-level type
+  ```
+
+  Before (0.4.1): `stage_ref` left as bare name → Steep error
+  ```rbs
+  type funnel_result = { title: String, ?stages: Array[stage_ref] }
+  ```
+
+  After (0.4.2): `stage_ref` automatically resolved and emitted first
+  ```rbs
+  type stage_ref = {id: String, title: String}
+  type funnel_result = { title: String, ?stages: Array[stage_ref] }
+  ```
+
+- **Cross-file type lookup**: `resolve_single_import` now falls back to scanning all `.rbs` files in `shared_paths` when the type name doesn't match a filename. This supports types co-located in a single file (e.g. `stage_ref` defined in `funnel.rbs`).
+
 ## [0.4.1] - 2026-05-08
 
 ### Fixed

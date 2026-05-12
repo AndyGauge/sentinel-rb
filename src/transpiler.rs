@@ -51,15 +51,162 @@ impl SentinelTranspiler {
 
     /// Resolve `# @rbs import <name>` by searching shared_paths for `<name>.rbs`,
     /// reading its contents, and returning the type aliases found inside.
+    /// Transitively resolves nested type references with cycle detection: if an
+    /// imported type references another type defined in `sig/shared/`, that type
+    /// is also imported. Dependencies are emitted before dependents (reverse-topological order).
     fn resolve_import(shared_paths: &[std::path::PathBuf], name: &str) -> Vec<String> {
+        let mut resolved: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        // Build the index of all available type names once, then pass it through
+        // the recursion so we don't re-read every .rbs file at each level of DFS.
+        let available: std::collections::BTreeSet<String> = Self::index_shared_types(shared_paths);
+        Self::resolve_import_recursive(shared_paths, name, &mut resolved, &mut seen, &available);
+        resolved
+    }
+
+    fn resolve_import_recursive(
+        shared_paths: &[std::path::PathBuf],
+        name: &str,
+        resolved: &mut Vec<String>,
+        seen: &mut std::collections::HashSet<String>,
+        available: &std::collections::BTreeSet<String>,
+    ) {
+        // Insert before resolution for cycle detection and to suppress
+        // repeated "Could not resolve" warnings for the same name.
+        if !seen.insert(name.to_string()) {
+            return; // already resolved or in progress — avoid cycles
+        }
+
+        // Find and parse the requested type file
+        let aliases = Self::resolve_single_import(shared_paths, name);
+        if aliases.is_empty() {
+            return;
+        }
+
+        // Scan the aliases for references to other shared types.
+        // Co-located types (same file) are NOT pre-marked in seen, so if alias A
+        // references co-located alias B, the recursion resolves and emits B first,
+        // guaranteeing topological order regardless of file order.
+        for alias in &aliases {
+            let defined_name = alias
+                .strip_prefix("type ")
+                .and_then(|rest| rest.split_whitespace().next())
+                .unwrap_or("");
+
+            for available_name in available {
+                if available_name != defined_name && !seen.contains(available_name) {
+                    if Self::references_type(alias, available_name) {
+                        Self::resolve_import_recursive(shared_paths, available_name, resolved, seen, available);
+                    }
+                }
+            }
+        }
+
+        // Emit aliases, skipping co-located types already emitted by recursive calls.
+        // The primary type (name) was inserted into seen at entry — use defined == name
+        // to ensure it's always emitted. For co-located types, seen.insert returns false
+        // if already resolved above, preventing duplicates.
+        for alias in aliases {
+            let defined = alias
+                .strip_prefix("type ")
+                .and_then(|rest| rest.split_whitespace().next())
+                .unwrap_or("");
+            if defined == name || seen.insert(defined.to_string()) {
+                resolved.push(alias);
+            }
+        }
+    }
+
+    /// Resolve a single import by name. First tries `<name>.rbs` (exact file match),
+    /// then scans all `.rbs` files for a `type <name> = ...` definition.
+    fn resolve_single_import(shared_paths: &[std::path::PathBuf], name: &str) -> Vec<String> {
+        // 1. Try exact file match: sig/shared/<name>.rbs
         for dir in shared_paths {
             let file = dir.join(format!("{}.rbs", name));
             if let Ok(contents) = fs::read_to_string(&file) {
                 return Self::parse_shared_rbs(&contents);
             }
         }
+
+        // 2. Scan all .rbs files for a type definition matching the name.
+        //    Parse each file once and filter — avoids reading the same file twice
+        //    (once for the line scan, once for parse_shared_rbs).
+        let target_prefix = format!("{} =", name);
+        for dir in shared_paths {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map_or(false, |e| e == "rbs") {
+                        if let Ok(contents) = fs::read_to_string(&path) {
+                            let all_aliases = Self::parse_shared_rbs(&contents);
+                            let matching: Vec<String> = all_aliases
+                                .into_iter()
+                                .filter(|a| {
+                                    a.strip_prefix("type ")
+                                        .map_or(false, |rest| rest.starts_with(&target_prefix))
+                                })
+                                .collect();
+                            if !matching.is_empty() {
+                                return matching;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         eprintln!("  [import] Could not resolve '{}' from shared paths", name);
         Vec::new()
+    }
+
+    /// Collect all type names defined across all `.rbs` files in shared_paths.
+    fn index_shared_types(shared_paths: &[std::path::PathBuf]) -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
+        for dir in shared_paths {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map_or(false, |e| e == "rbs") {
+                        if let Ok(contents) = fs::read_to_string(&path) {
+                            for line in contents.lines() {
+                                let trimmed = line.trim();
+                                if let Some(rest) = trimmed.strip_prefix("type ") {
+                                    if let Some(name) = rest.split_whitespace().next() {
+                                        names.insert(name.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        names
+    }
+
+    /// Check whether an alias body references a given type name.
+    /// Matches the name as a whole word (not as a substring of another identifier).
+    fn references_type(alias: &str, type_name: &str) -> bool {
+        let name_bytes = type_name.as_bytes();
+        let alias_bytes = alias.as_bytes();
+        let name_len = name_bytes.len();
+
+        let mut i = 0;
+        while i + name_len <= alias_bytes.len() {
+            if &alias_bytes[i..i + name_len] == name_bytes {
+                // Check word boundary before
+                let before_ok = i == 0 || (!alias_bytes[i - 1].is_ascii_alphanumeric() && alias_bytes[i - 1] != b'_');
+                // Check word boundary after
+                let after_pos = i + name_len;
+                let after_ok = after_pos >= alias_bytes.len()
+                    || (!alias_bytes[after_pos].is_ascii_alphanumeric() && alias_bytes[after_pos] != b'_');
+                if before_ok && after_ok {
+                    return true;
+                }
+            }
+            i += 1;
+        }
+        false
     }
 
     /// Parse a bare `.rbs` file from `sig/shared/` and extract type alias definitions.
@@ -800,6 +947,7 @@ impl SentinelTranspiler {
 mod tests {
     use super::*;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_simple_class_name() {
@@ -2028,5 +2176,140 @@ end
                 "other: { a: String, b: Integer }",
             ]
         );
+    }
+
+    #[test]
+    fn test_recursive_import_resolves_nested_types() {
+        let tmp = TempDir::new().unwrap();
+        let shared_dir = tmp.path().join("shared");
+        fs::create_dir_all(&shared_dir).unwrap();
+
+        fs::write(
+            shared_dir.join("stage_ref.rbs"),
+            "type stage_ref = {\n  id: String @desc(Stage ID),\n  title: String\n}\n",
+        ).unwrap();
+        fs::write(
+            shared_dir.join("owner_ref.rbs"),
+            "type owner_ref = {\n  name: String,\n  email: String @format(email)\n}\n",
+        ).unwrap();
+        fs::write(
+            shared_dir.join("funnel_result.rbs"),
+            "type funnel_result = {\n  title: String,\n  ?stages: Array[stage_ref],\n  ?owner: owner_ref\n}\n",
+        ).unwrap();
+
+        let test_file = tmp.path().join("test.rb");
+        fs::write(
+            &test_file,
+            "module Tool\n  class GetFunnel\n    # @rbs import funnel_result\n\n    # @rbs type success = {\n    #   success: true,\n    #   funnel: funnel_result\n    # }\n\n    #: () -> success\n    def call\n    end\n  end\nend\n",
+        ).unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        transpiler.set_shared_paths(vec![shared_dir.clone()]);
+        let result = transpiler.transpile_file(&test_file).unwrap();
+
+        assert!(result.contains("type funnel_result ="), "Expected funnel_result type, got: {}", result);
+        assert!(result.contains("type stage_ref ="), "Expected stage_ref to be recursively resolved, got: {}", result);
+        assert!(result.contains("type owner_ref ="), "Expected owner_ref to be recursively resolved, got: {}", result);
+        assert!(!result.contains("@desc"), "Expected annotations to be stripped, got: {}", result);
+        assert!(!result.contains("@format"), "Expected annotations to be stripped, got: {}", result);
+
+        // Dependencies should appear before the type that references them
+        let stage_pos = result.find("type stage_ref =").unwrap();
+        let owner_pos = result.find("type owner_ref =").unwrap();
+        let funnel_pos = result.find("type funnel_result =").unwrap();
+        assert!(stage_pos < funnel_pos, "stage_ref should appear before funnel_result");
+        assert!(owner_pos < funnel_pos, "owner_ref should appear before funnel_result");
+    }
+
+    #[test]
+    fn test_recursive_import_no_cycles() {
+        let tmp = TempDir::new().unwrap();
+        let shared_dir = tmp.path().join("shared");
+        fs::create_dir_all(&shared_dir).unwrap();
+
+        fs::write(shared_dir.join("type_a.rbs"), "type type_a = { ref: type_b }\n").unwrap();
+        fs::write(shared_dir.join("type_b.rbs"), "type type_b = { ref: type_a }\n").unwrap();
+
+        let test_file = tmp.path().join("test.rb");
+        fs::write(
+            &test_file,
+            "class Foo\n  # @rbs import type_a\n\n  #: () -> type_a\n  def call\n  end\nend\n",
+        ).unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        transpiler.set_shared_paths(vec![shared_dir.clone()]);
+        let result = transpiler.transpile_file(&test_file).unwrap();
+
+        assert!(result.contains("type type_a ="), "Expected type_a, got: {}", result);
+        assert!(result.contains("type type_b ="), "Expected type_b, got: {}", result);
+    }
+
+    #[test]
+    fn test_recursive_import_types_in_same_file() {
+        let tmp = TempDir::new().unwrap();
+        let shared_dir = tmp.path().join("shared");
+        fs::create_dir_all(&shared_dir).unwrap();
+
+        fs::write(
+            shared_dir.join("bundle.rbs"),
+            "type inner = { id: String }\n\ntype bundle = { item: inner }\n",
+        ).unwrap();
+
+        let test_file = tmp.path().join("test.rb");
+        fs::write(
+            &test_file,
+            "class Foo\n  # @rbs import bundle\n\n  #: () -> bundle\n  def call\n  end\nend\n",
+        ).unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        transpiler.set_shared_paths(vec![shared_dir.clone()]);
+        let result = transpiler.transpile_file(&test_file).unwrap();
+
+        assert!(result.contains("type inner ="), "Expected inner, got: {}", result);
+        assert!(result.contains("type bundle ="), "Expected bundle, got: {}", result);
+
+        // No duplicates — inner should appear exactly once
+        let count = result.matches("type inner =").count();
+        assert_eq!(count, 1, "Expected inner exactly once, found {} times in: {}", count, result);
+    }
+
+    #[test]
+    fn test_colocated_types_reversed_file_order() {
+        let tmp = TempDir::new().unwrap();
+        let shared_dir = tmp.path().join("shared");
+        fs::create_dir_all(&shared_dir).unwrap();
+
+        // bundle is defined BEFORE inner in the file — dependency order is reversed
+        fs::write(
+            shared_dir.join("bundle.rbs"),
+            "type bundle = { item: inner }\n\ntype inner = { id: String }\n",
+        ).unwrap();
+
+        let test_file = tmp.path().join("test.rb");
+        fs::write(
+            &test_file,
+            "class Foo\n  # @rbs import bundle\n\n  #: () -> bundle\n  def call\n  end\nend\n",
+        ).unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        transpiler.set_shared_paths(vec![shared_dir.clone()]);
+        let result = transpiler.transpile_file(&test_file).unwrap();
+
+        assert!(result.contains("type inner ="), "Expected inner, got: {}", result);
+        assert!(result.contains("type bundle ="), "Expected bundle, got: {}", result);
+
+        // inner must appear before bundle even though file order is reversed
+        let inner_pos = result.find("type inner =").unwrap();
+        let bundle_pos = result.find("type bundle =").unwrap();
+        assert!(inner_pos < bundle_pos, "inner should appear before bundle (dependency order), got: {}", result);
+    }
+
+    #[test]
+    fn test_references_type_word_boundary() {
+        assert!(SentinelTranspiler::references_type("type foo = { e: error }", "error"));
+        assert!(!SentinelTranspiler::references_type("type foo = { e: error_code }", "error"));
+        assert!(SentinelTranspiler::references_type("type foo = { e: Array[error] }", "error"));
+        assert!(SentinelTranspiler::references_type("type foo = { e: error, f: String }", "error"));
+        assert!(SentinelTranspiler::references_type("type error = { code: String }", "error"));
     }
 }
