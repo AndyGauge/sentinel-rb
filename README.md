@@ -188,12 +188,12 @@ The `# @rbs import <name>` feature is unique to Sentinel: it resolves shared typ
 
 Benchmarked on a production Rails app (5,000+ files):
 
-| Tool | Files generated | Time | Header required |
-|------|----------------|------|----------------|
-| inline-rbs | 174 | 2.540s | yes |
-| sentinel | 174 | 306ms | no |
+| Tool | Files generated | Time | Peak memory | Header required |
+|------|----------------|------|-------------|----------------|
+| inline-rbs | 174 | 2.540s | 63 MB | yes |
+| sentinel | 174 | 306ms | 9.7 MB | no |
 
-~8x faster on identical output. Sentinel also requires no opt-in header in each source file, which matters when rolling out type coverage across a large existing codebase or a Rails engine where you don't own every file.
+~8x faster, ~6.5x less memory, identical output. Sentinel also requires no opt-in header in each source file, which matters when rolling out type coverage across a large existing codebase or a Rails engine where you don't own every file.
 
 ### Watching for changes
 
