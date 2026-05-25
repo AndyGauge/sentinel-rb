@@ -1,6 +1,8 @@
 # 🛡️ Sentinel
 
-**Sentinel** is a high-performance Rust-powered watcher that keeps your Ruby code and RBS type signatures in perfect sync. It bridges the gap between dynamic Ruby models and static RBS type definitions.
+RBS type signature generator for Rails — Rust-powered, CI-ready.
+
+**Sentinel** keeps your Ruby code and RBS type signatures in perfect sync. It bridges the gap between dynamic Ruby models and static RBS type definitions using a Rust transpiler for speed at scale.
 
 ## 🚀 Getting Started
 
@@ -159,8 +161,45 @@ require('lspconfig').steep.setup({
   -- ... rest of your config
 })---
 ```
+## Performance
+
+Benchmarked on a production Rails app (5,000+ files):
+
+| Tool | Files generated | Time | Header required |
+|------|----------------|------|----------------|
+| inline-rbs | 174 | 2.540s | yes |
+| sentinel | 174 | 306ms | no |
+
+~8x faster on identical output. Sentinel also requires no opt-in header in each source file, which matters when rolling out type coverage across a large existing codebase or a Rails engine where you don't own every file.
+
+### Watching for changes
+
+**inline-rbs** has no built-in watcher. The recommended approach requires composing three external tools:
+
+```bash
+fswatch -0 lib | xargs -0 -n1 bundle exec rbs-inline --output
+```
+
+This requires `fswatch` to be installed separately, spawns a new Ruby process on every file save, and is macOS-specific.
+
+**Sentinel** builds and watches in one command:
+
+```bash
+bundle exec sentinel
+```
+
+The watcher is built into the Rust binary — no extra dependencies, cross-platform, and no per-save process spawn overhead.
+
+---
+
 ## ⚠️ Troubleshooting
 
 If Steep fails to start with "Exit Code 2", ensure you are running within the correct environment. Sentinel depends on the bundle context to resolve paths correctly. If using asdf or rbenv, ensure your shims are updated:
 
     asdf reshim ruby
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
