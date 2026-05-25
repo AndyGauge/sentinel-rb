@@ -161,6 +161,29 @@ require('lspconfig').steep.setup({
   -- ... rest of your config
 })---
 ```
+## Feature Comparison
+
+Sentinel covers the full rbs-inline annotation surface and is ahead on two items from the [rbs-inline roadmap](https://github.com/soutaro/rbs-inline/wiki/Roadmap):
+
+| Feature | rbs-inline | sentinel |
+|---------|-----------|---------|
+| Instance methods (`#:`) | ✓ | ✓ |
+| Self/class methods | ✓ | ✓ |
+| Modules | ✓ | ✓ |
+| `attr_reader` / `attr_writer` / `attr_accessor` | ✓ | ✓ |
+| Type alias declarations (`# @rbs type`) | not yet | ✓ |
+| Overload annotations | not yet | partial (last annotation wins) |
+| Shared type imports (`# @rbs import`) | — | ✓ transitive, cycle-safe |
+| Header required per file | yes | no |
+| Class variables | not yet | not yet |
+| Module functions | not yet | not yet |
+| Interface declarations | not yet | not yet |
+| Class/module aliases | not yet | not yet |
+
+The `# @rbs import <name>` feature is unique to Sentinel: it resolves shared type definitions from `sig/shared/`, walks transitive dependencies in topological order, and handles circular references. rbs-inline has no equivalent.
+
+---
+
 ## Performance
 
 Benchmarked on a production Rails app (5,000+ files):
