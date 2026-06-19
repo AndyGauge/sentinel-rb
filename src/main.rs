@@ -18,17 +18,27 @@ async fn main() -> Result<()> {
         "init" => {
             let config = SentinelConfig::ensure_exists()?;
             std::fs::create_dir_all(config.output_path())?;
+            let output = config.output_path();
             let shared = config.shared_type_paths();
             for folder in config.folder_paths() {
-                init::run(&folder, &config.output_path(), &shared);
+                // init::run fans out over files with rayon (a blocking call), so
+                // run it on the blocking pool rather than a tokio worker thread.
+                let (output, shared) = (output.clone(), shared.clone());
+                tokio::task::spawn_blocking(move || init::run(&folder, &output, &shared)).await?;
             }
         }
         "check" => {
             let config = SentinelConfig::load()?;
+            let output = config.output_path();
             let shared = config.shared_type_paths();
             let mut all_ok = true;
             for folder in config.folder_paths() {
-                if !check::run(&folder, &config.output_path(), &shared) {
+                // check::run is rayon-parallel and blocking; keep it off the runtime.
+                let (output, shared) = (output.clone(), shared.clone());
+                let ok =
+                    tokio::task::spawn_blocking(move || check::run(&folder, &output, &shared))
+                        .await?;
+                if !ok {
                     all_ok = false;
                 }
             }
@@ -39,9 +49,12 @@ async fn main() -> Result<()> {
         "watch" => {
             let config = SentinelConfig::ensure_exists()?;
             std::fs::create_dir_all(config.output_path())?;
+            let output = config.output_path();
             let shared = config.shared_type_paths();
             for folder in config.folder_paths() {
-                init::run(&folder, &config.output_path(), &shared);
+                // Same blocking rayon batch as `init`, before the async watch loop starts.
+                let (output, shared) = (output.clone(), shared.clone());
+                tokio::task::spawn_blocking(move || init::run(&folder, &output, &shared)).await?;
             }
             let watcher = SentinelWatcher::new(&config)?.with_plugins();
             watcher.run().await;
