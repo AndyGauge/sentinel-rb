@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use walkdir::WalkDir;
 
-pub fn run(app_path: &Path, output_path: &Path, shared_paths: &[PathBuf]) {
+pub fn run(app_path: &Path, output_path: &Path, shared_paths: &[PathBuf], emit_superclasses: bool) {
     let start = Instant::now();
     let app_root = app_path
         .canonicalize()
@@ -41,6 +41,7 @@ pub fn run(app_path: &Path, output_path: &Path, shared_paths: &[PathBuf]) {
 
     files.par_iter().for_each(|path| {
         let mut transpiler = SentinelTranspiler::new();
+        transpiler.set_emit_superclasses(emit_superclasses);
         transpiler.set_shared_paths(shared_paths.to_vec());
 
         match transpiler.transpile_file(path) {

@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.5.0] - 2026-07-31
+
+### Added
+- **`emit_superclasses` config option** (default `false`): emit `class Foo < Bar` instead of a bare `class Foo`.
+
+  Without a parent in the generated RBS, every class looks to Steep like it inherits from `Object`. Inherited methods, class-level DSL macros and inherited type aliases are therefore invisible — and because `Steep::Diagnostic::Ruby::NoMethod` is commonly disabled in `Steepfile`, a call to an inherited macro type-checks silently no matter what it is passed. Enabling this lets Steep resolve the parent and actually check those call sites.
+
+  ```toml
+  # .sentinel.toml
+  emit_superclasses = true
+  ```
+
+  ```rbs
+  # false (default)     # true
+  class User            class User < ApplicationRecord
+  ```
+
+  Off by default deliberately: turning it on makes Steep check inherited signatures for the first time, which surfaces pre-existing type errors. That is the intent, but it belongs in a deliberate migration rather than a version bump. On one ~5,500-file Rails app this changed 165 of 195 generated files and surfaced 12 previously-invisible diagnostics.
+
+  Parents that are not a plain constant path (`Struct.new(:a)`, `Class.new`, `Data.define(...)`) are skipped, since RBS cannot name an anonymous class. Modules never receive a parent. The path is emitted exactly as written, so a namespace-relative parent stays relative — RBS resolves it the same way Ruby does.
+
 ## [0.4.2] - 2026-05-11
 
 ### Added

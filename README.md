@@ -50,6 +50,44 @@ output = "sig/generated"
 
 You can also edit this file directly. Sentinel reads it on every `init` and `watch` command.
 
+### 4. Emitting Superclasses (opt-in)
+
+By default a class is emitted without its parent — `class User < ApplicationRecord`
+becomes `class User`. Set `emit_superclasses` to keep the parent:
+
+```toml
+folders = ["app"]
+output = "sig/generated"
+emit_superclasses = true
+```
+
+```rbs
+# emit_superclasses = false (default)      # emit_superclasses = true
+class User                                 class User < ApplicationRecord
+```
+
+Turn this on when you want Steep to resolve **inherited** methods, class-level DSL
+macros and type aliases. Without a parent, every generated class looks like it
+inherits from `Object`, so a call to an inherited macro is not merely untyped — Steep
+cannot see the method at all, and a `NoMethod` diagnostic is often disabled in
+`Steepfile`, so it passes silently.
+
+**It is off by default because it is not a no-op.** Once the parent is visible, Steep
+starts checking inherited signatures and will surface pre-existing type errors that
+were previously unreachable. That is the point, but it should be a deliberate
+migration rather than something a version bump does to you. Expect to fix or
+`# steep:ignore` some findings on first enable.
+
+Parents that are not a plain constant path are skipped, since RBS has no way to name
+an anonymous class:
+
+```ruby
+class Meta < Struct.new(:a, :b)   # emitted as `class Meta` either way
+```
+
+A superclass is written exactly as it appears in source. RBS resolves relative to the
+enclosing namespace the same way Ruby does, so a relative parent stays relative.
+
 ---
 
 ## 🔍 Checking Signatures in CI / Pre-commit
