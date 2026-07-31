@@ -17,6 +17,11 @@ struct SubModuleInfo {
 struct ClassInfo {
     modules: Vec<String>,
     class_name: String,
+    /// Superclass constant path as written in source, e.g. `Tool::WorkflowBase`.
+    /// `None` for modules, for classes with no explicit parent, and for parents
+    /// that are not a plain constant path (`Struct.new(:a)`, `Class.new`, ...),
+    /// which cannot be expressed as an RBS superclass.
+    superclass: Option<String>,
     is_module: bool,
     methods: Vec<(String, String)>,
     self_methods: Vec<(String, String)>,
@@ -28,6 +33,7 @@ struct ClassInfo {
 pub struct SentinelTranspiler {
     parser: Parser,
     shared_paths: Vec<std::path::PathBuf>,
+    emit_superclasses: bool,
 }
 
 impl SentinelTranspiler {
@@ -41,12 +47,18 @@ impl SentinelTranspiler {
         Self {
             parser,
             shared_paths: Vec::new(),
+            emit_superclasses: false,
         }
     }
 
     /// Set the directories to search for shared `.rbs` type files (used by `# @rbs import`).
     pub fn set_shared_paths(&mut self, paths: Vec<std::path::PathBuf>) {
         self.shared_paths = paths;
+    }
+
+    /// Enable `class Foo < Bar` output. See `SentinelConfig::emit_superclasses`.
+    pub fn set_emit_superclasses(&mut self, enabled: bool) {
+        self.emit_superclasses = enabled;
     }
 
     /// Resolve `# @rbs import <name>` by searching shared_paths for `<name>.rbs`,
@@ -371,6 +383,7 @@ impl SentinelTranspiler {
         let mut info = ClassInfo {
             modules: Vec::new(),
             class_name: "UnknownClass".to_string(),
+            superclass: None,
             is_module: false,
             methods: Vec::new(),
             self_methods: Vec::new(),
@@ -574,6 +587,37 @@ impl SentinelTranspiler {
         }
     }
 
+    /// Extract an RBS-expressible superclass from a tree-sitter `superclass` node's
+    /// text, which arrives including the `<` (e.g. `"< Tool::WorkflowBase"`).
+    ///
+    /// Only a plain constant path is accepted. Ruby lets a superclass be any
+    /// expression — `Struct.new(:a)`, `Class.new`, `Data.define(...)` — and RBS has
+    /// no way to name the resulting anonymous class, so those yield `None` and the
+    /// class is emitted without a parent rather than emitting invalid RBS.
+    ///
+    /// The path is kept exactly as written. RBS resolves relative to the enclosing
+    /// namespace the same way Ruby does, so rewriting `Foo` to `::Foo` here would
+    /// change meaning for a parent that really is namespace-relative.
+    fn parse_superclass(text: &str) -> Option<String> {
+        let name = text.trim_start().strip_prefix('<')?.trim();
+        if name.is_empty() {
+            return None;
+        }
+        let is_const_path = name
+            .split("::")
+            .enumerate()
+            .all(|(i, seg)| {
+                // A leading `::` produces an empty first segment, which is fine.
+                if seg.is_empty() {
+                    return i == 0;
+                }
+                let mut chars = seg.chars();
+                chars.next().is_some_and(|c| c.is_ascii_uppercase())
+                    && chars.all(|c| c.is_alphanumeric() || c == '_')
+            });
+        is_const_path.then(|| name.to_string())
+    }
+
     fn walk(
         source: &str,
         node: Node,
@@ -622,6 +666,7 @@ impl SentinelTranspiler {
                         let mut parent_info = ClassInfo {
                             modules: Vec::new(),
                             class_name: "UnknownClass".to_string(),
+                            superclass: None,
                             is_module: false,
                             methods: Vec::new(),
                             self_methods: Vec::new(),
@@ -674,6 +719,12 @@ impl SentinelTranspiler {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     info.class_name = Self::node_text(source, &name_node).to_string();
                 }
+
+                // Set unconditionally: a previously scanned sibling class must not
+                // leak its parent onto this one.
+                info.superclass = node
+                    .child_by_field_name("superclass")
+                    .and_then(|n| Self::parse_superclass(Self::node_text(source, &n)));
 
                 // Clear any data from a previously scanned module container
                 info.methods.clear();
@@ -843,7 +894,18 @@ impl SentinelTranspiler {
         let class_indent = "  ".repeat(depth);
         let member_indent = "  ".repeat(depth + 1);
         let keyword = if info.is_module { "module" } else { "class" };
-        rbs_output.push_str(&format!("{}{} {}\n", class_indent, keyword, info.class_name));
+        // Superclass is emitted so Steep can resolve inherited methods, macros and
+        // type aliases. Without it every generated class looks like it inherits from
+        // Object, so class-level DSL calls (`wraps`, `authorization`, ...) and
+        // inherited helpers are invisible to the type checker.
+        let inherits = match (&info.superclass, info.is_module, self.emit_superclasses) {
+            (Some(parent), false, true) => format!(" < {}", parent),
+            _ => String::new(),
+        };
+        rbs_output.push_str(&format!(
+            "{}{} {}{}\n",
+            class_indent, keyword, info.class_name, inherits
+        ));
 
         // Type aliases
         for alias in &info.type_aliases {
@@ -957,7 +1019,7 @@ mod tests {
         let mut transpiler = SentinelTranspiler::new();
         let result = transpiler.transpile_file(test_file).unwrap();
         // No modules, just class
-        assert!(result.contains("class User\n"), "Got: {}", result);
+        assert!(result.contains("class User\n"), "Got: {}", result); // default: no parent
         assert!(result.contains("  def name: () -> String"), "Got: {}", result);
     }
 
@@ -969,7 +1031,7 @@ mod tests {
         let mut transpiler = SentinelTranspiler::new();
         let result = transpiler.transpile_file(test_file).unwrap();
         // Compact syntax: no enclosing modules, class name keeps ::
-        assert!(result.contains("class ApplicantFilter::Set\n"), "Got: {}", result);
+        assert!(result.contains("class ApplicantFilter::Set\n"), "Got: {}", result); // default: no parent
     }
 
     #[test]
@@ -982,7 +1044,7 @@ mod tests {
         // Must emit nested modules, not flat qualified name
         assert!(result.contains("module Tool\n"), "Expected module Tool, got: {}", result);
         assert!(result.contains("  module IdleRuleHandlers\n"), "Expected module IdleRuleHandlers, got: {}", result);
-        assert!(result.contains("    class Set\n"), "Expected class Set, got: {}", result);
+        assert!(result.contains("    class Set\n"), "Expected class Set, got: {}", result); // default: no parent
         assert!(result.contains("      def perform: () -> void"), "Expected indented method, got: {}", result);
         // Verify closing ends
         assert!(result.contains("    end\n  end\nend\n"), "Expected nested ends, got: {}", result);
@@ -1008,7 +1070,7 @@ mod tests {
         let mut transpiler = SentinelTranspiler::new();
         let result = transpiler.transpile_file(test_file).unwrap();
         assert!(result.contains("module Tool\n"), "Got: {}", result);
-        assert!(result.contains("  class Base\n"), "Got: {}", result);
+        assert!(result.contains("  class Base\n"), "Got: {}", result); // default: no parent
         assert!(result.contains("def initialize: (current_user: User, current_account: Account, params: ActionController::Parameters) -> void"), "Missing initialize, got: {}", result);
         assert!(result.contains("def call: () -> Hash[Symbol, untyped]"), "Missing call, got: {}", result);
         assert!(result.contains("def usage_info: () -> Hash[Symbol, untyped]"), "Missing usage_info, got: {}", result);
@@ -2312,4 +2374,102 @@ end
         assert!(SentinelTranspiler::references_type("type foo = { e: error, f: String }", "error"));
         assert!(SentinelTranspiler::references_type("type error = { code: String }", "error"));
     }
+    #[test]
+    fn test_superclass_omitted_when_absent() {
+        let test_file = Path::new("/tmp/test_superclass_absent.rb");
+        fs::write(test_file, "class Plain\n  #: () -> String\n  def name\n  end\nend\n").unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        transpiler.set_emit_superclasses(true);
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(result.contains("class Plain\n"), "Got: {}", result);
+        assert!(!result.contains(" < "), "Should not invent a parent, got: {}", result);
+    }
+
+    #[test]
+    fn test_superclass_omitted_for_non_constant_parent() {
+        // Ruby allows any expression as a superclass. RBS cannot name an anonymous
+        // class, so these must degrade to no parent rather than emit invalid RBS.
+        for src in [
+            "class Meta < Struct.new(:a, :b)\n  #: () -> String\n  def name\n  end\nend\n",
+            "class Anon < Class.new\n  #: () -> String\n  def name\n  end\nend\n",
+            "class Point < Data.define(:x)\n  #: () -> String\n  def name\n  end\nend\n",
+        ] {
+            let test_file = Path::new("/tmp/test_superclass_non_const.rb");
+            fs::write(test_file, src).unwrap();
+
+            let mut transpiler = SentinelTranspiler::new();
+            transpiler.set_emit_superclasses(true);
+            let result = transpiler.transpile_file(test_file).unwrap();
+            assert!(!result.contains(" < "), "Expected no parent for {:?}, got: {}", src, result);
+            assert!(result.contains("def name: () -> String"), "Got: {}", result);
+        }
+    }
+
+    #[test]
+    fn test_superclass_keeps_leading_scope_operator() {
+        let test_file = Path::new("/tmp/test_superclass_absolute.rb");
+        fs::write(test_file, "class Widget < ::Tool::ControllerBacked\n  #: () -> String\n  def name\n  end\nend\n").unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        transpiler.set_emit_superclasses(true);
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(result.contains("class Widget < ::Tool::ControllerBacked\n"), "Got: {}", result);
+    }
+
+    #[test]
+    fn test_module_never_gets_a_superclass() {
+        let test_file = Path::new("/tmp/test_module_no_super.rb");
+        fs::write(test_file, "module Helpers\n  #: () -> String\n  def name\n  end\nend\n").unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        transpiler.set_emit_superclasses(true);
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(result.contains("module Helpers\n"), "Got: {}", result);
+        assert!(!result.contains(" < "), "Got: {}", result);
+    }
+
+    #[test]
+    fn test_sibling_class_does_not_inherit_previous_parent() {
+        // `info` is reused across classes in one file; a stale superclass would leak.
+        let test_file = Path::new("/tmp/test_superclass_no_leak.rb");
+        fs::write(
+            test_file,
+            "class First < ApplicationRecord\n  #: () -> String\n  def a\n  end\nend\n\nclass Second\n  #: () -> String\n  def b\n  end\nend\n",
+        )
+        .unwrap();
+
+        let mut transpiler = SentinelTranspiler::new();
+        transpiler.set_emit_superclasses(true);
+        let result = transpiler.transpile_file(test_file).unwrap();
+        assert!(result.contains("class Second\n"), "Second must have no parent, got: {}", result);
+    }
+
+    #[test]
+    fn test_parse_superclass_unit() {
+        assert_eq!(SentinelTranspiler::parse_superclass("< Foo"), Some("Foo".to_string()));
+        assert_eq!(SentinelTranspiler::parse_superclass("<Foo::Bar"), Some("Foo::Bar".to_string()));
+        assert_eq!(SentinelTranspiler::parse_superclass("< ::Foo"), Some("::Foo".to_string()));
+        assert_eq!(SentinelTranspiler::parse_superclass("< Struct.new(:a)"), None);
+        assert_eq!(SentinelTranspiler::parse_superclass("< foo"), None);
+        assert_eq!(SentinelTranspiler::parse_superclass("<"), None);
+        assert_eq!(SentinelTranspiler::parse_superclass("Foo"), None);
+    }
+
+    #[test]
+    fn test_superclass_gated_by_flag() {
+        let test_file = Path::new("/tmp/test_superclass_flag.rb");
+        fs::write(test_file, "class User < ApplicationRecord\n  #: () -> String\n  def name\n  end\nend\n").unwrap();
+
+        let mut off = SentinelTranspiler::new();
+        let without = off.transpile_file(test_file).unwrap();
+        assert!(without.contains("class User\n"), "Got: {}", without);
+        assert!(!without.contains(" < "), "Flag off must not emit a parent, got: {}", without);
+
+        let mut on = SentinelTranspiler::new();
+        on.set_emit_superclasses(true);
+        let with = on.transpile_file(test_file).unwrap();
+        assert!(with.contains("class User < ApplicationRecord\n"), "Got: {}", with);
+    }
+
 }
